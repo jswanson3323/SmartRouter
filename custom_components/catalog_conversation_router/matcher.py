@@ -113,6 +113,8 @@ class FuzzyMatcher:
         utter_tokens = self._normalize_asr_target_tokens(parsed_target_before)
         parsed_target_after = " ".join(utter_tokens)
         utter_phonetic = set(phonetic_tokens(utter_tokens))
+        utter_full_tokens = tokenize(normalized)
+        utter_full_phonetic = set(phonetic_tokens(utter_full_tokens))
 
         scores: list[CandidateScore] = []
 
@@ -164,11 +166,14 @@ class FuzzyMatcher:
             ]
             alias_similarity = max(alias_scores) if alias_scores else 0.0
 
-            phrase_candidates = [
+            raw_phrase_candidates = [
                 phrase
                 for phrase in [*target.sample_phrases, target.canonical_phrase, target.display_name]
                 if phrase
             ]
+            phrase_candidates: list[str] = []
+            for phrase in raw_phrase_candidates:
+                phrase_candidates.extend(self._expand_conversation_phrase_variants(phrase))
             if not phrase_candidates:
                 phrase_candidates = [target.display_name]
 
@@ -187,8 +192,8 @@ class FuzzyMatcher:
                 phrase_phonetic = set(phonetic_tokens(phrase_tokens))
 
                 score_detail = self._score_signals(
-                    utter_tokens=utter_tokens,
-                    utter_phonetic=utter_phonetic,
+                    utter_tokens=utter_full_tokens,
+                    utter_phonetic=utter_full_phonetic,
                     target_tokens=phrase_tokens,
                     target_phonetic=phrase_phonetic,
                     utter_target_text=normalized,
@@ -211,8 +216,8 @@ class FuzzyMatcher:
                     best_score_detail = score_detail
 
             score_detail = best_score_detail or self._score_signals(
-                utter_tokens=utter_tokens,
-                utter_phonetic=utter_phonetic,
+                utter_tokens=utter_full_tokens,
+                utter_phonetic=utter_full_phonetic,
                 target_tokens=best_target_tokens,
                 target_phonetic=best_target_phonetic,
                 utter_target_text=normalized,
@@ -408,11 +413,7 @@ class FuzzyMatcher:
         return min(1.0, ratio + first_token_bonus)
 
     def _normalize_conversation_phrase_for_scoring(self, phrase: str) -> str:
-        """Normalize Home Assistant sentence syntax for fuzzy scoring.
-
-        This strips slot placeholders and optional markers so matching is based on
-        the fixed words a user is likely to say.
-        """
+        """Normalize Home Assistant sentence syntax for fuzzy scoring."""
         working = phrase.lower()
 
         # Replace slot placeholders before punctuation/brace normalization.
@@ -421,7 +422,7 @@ class FuzzyMatcher:
         # Remove optional markers while keeping the inner text.
         working = working.replace("[", " ").replace("]", " ")
 
-        # Reduce alternation groups like `(alarm | timer | reminder)` to their options.
+        # Reduce alternation groups like `(alarm | timer | reminder)` to a simple space-separated form.
         def _replace_alternation(match: re.Match[str]) -> str:
             content = match.group(1)
             options = [normalize_text(part) for part in content.split("|")]
@@ -433,13 +434,61 @@ class FuzzyMatcher:
         working = re.sub(r"\(([^)]+)\)", _replace_alternation, working)
         working = normalize_text(working)
 
-        # Drop filler determiners and common placeholder names that can leak into scoring.
         tokens = [
             token
             for token in tokenize(working)
             if token not in {"a", "an", "the", "my", "when", "amount", "name"}
         ]
         return " ".join(tokens)
+
+    def _expand_conversation_phrase_variants(self, phrase: str) -> list[str]:
+        """Expand a HA sentence pattern into simple phrase variants for scoring."""
+        variants = [phrase]
+
+        # Expand one level of alternation groups like `(set|start)` or `(alarm | timer)`.
+        while True:
+            expanded = False
+            next_variants: list[str] = []
+            for variant in variants:
+                match = re.search(r"\(([^()]+)\)", variant)
+                if not match:
+                    next_variants.append(variant)
+                    continue
+                expanded = True
+                options = [part.strip() for part in match.group(1).split("|") if part.strip()]
+                prefix = variant[: match.start()]
+                suffix = variant[match.end() :]
+                for option in options:
+                    next_variants.append(prefix + option + suffix)
+            variants = next_variants
+            if not expanded:
+                break
+
+        # Expand simple optional groups like `[a | an]` or `[my]`.
+        final_variants: list[str] = []
+        for variant in variants:
+            match = re.search(r"\[([^\[\]]+)\]", variant)
+            if not match:
+                final_variants.append(variant)
+                continue
+
+            content = match.group(1)
+            options = [part.strip() for part in content.split("|") if part.strip()]
+            prefix = variant[: match.start()]
+            suffix = variant[match.end() :]
+            final_variants.append(prefix + suffix)
+            for option in options:
+                final_variants.append(prefix + option + suffix)
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for variant in final_variants or variants:
+            normalized = self._normalize_conversation_phrase_for_scoring(variant)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            cleaned.append(variant)
+        return cleaned
 
     def _build_entity_canonical(self, action: str | None, name: str) -> str:
         prefix = CANONICAL_ACTION_TEXT.get(action or "", "activate")

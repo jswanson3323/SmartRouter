@@ -50,6 +50,63 @@ def _catalog() -> Catalog:
     )
 
 
+def _room_catalog() -> Catalog:
+    return Catalog(
+        metadata=CatalogMetadata(
+            revision="r2",
+            last_refreshed="now",
+            language="en",
+            entity_count=3,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="light.office_light",
+                name="Office Light",
+                normalized_name="office light",
+                aliases=[],
+                domain="light",
+                area="Office",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["office", "light"],
+                phonetic_tokens=["O120", "L230"],
+            ),
+            EntityTarget(
+                entity_id="fan.office_fan",
+                name="Office Fan",
+                normalized_name="office fan",
+                aliases=[],
+                domain="fan",
+                area="Office",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["office", "fan"],
+                phonetic_tokens=["O120", "F500"],
+            ),
+            EntityTarget(
+                entity_id="fan.great_room_fan",
+                name="Great Room Fan",
+                normalized_name="great room fan",
+                aliases=["break room fan"],
+                domain="fan",
+                area="Great Room",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["great", "room", "fan", "break"],
+                phonetic_tokens=["G630", "R500", "F500", "B620"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+
+
 def test_token_correction_matches_entity() -> None:
     matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
     result = matcher.match("turn on kitchen line", _catalog())
@@ -116,3 +173,30 @@ def test_same_canonical_phrase_not_counted_as_ambiguity() -> None:
     assert result.best.canonical_phrase == "turn on kitchen light"
     assert result.matched is True
     assert len({c.canonical_phrase for c in result.top_candidates}) == len(result.top_candidates)
+
+
+def test_turn_on_office_life_maps_to_office_light() -> None:
+    matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
+    result = matcher.match("turn on the office life", _room_catalog())
+    assert result.best is not None
+    assert result.best.candidate_id == "light.office_light"
+    assert result.best.canonical_phrase.lower() == "turn on office light"
+    assert result.parsed_target_before_normalization == "the office life"
+    assert result.parsed_target_after_normalization == "office light"
+
+
+def test_turn_on_kitchen_line_maps_to_kitchen_light() -> None:
+    matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
+    result = matcher.match("turn on the kitchen line", _catalog())
+    assert result.best is not None
+    assert result.best.canonical_phrase.lower() == "turn on kitchen light"
+    assert result.parsed_target_after_normalization == "kitchen light"
+
+
+def test_turn_off_break_room_fam_maps_to_great_room_fan() -> None:
+    matcher = FuzzyMatcher(fuzzy_threshold=0.45, ambiguity_gap=0.05)
+    result = matcher.match("turn off the break room fam", _room_catalog())
+    assert result.best is not None
+    assert result.best.candidate_id == "fan.great_room_fan"
+    assert result.best.canonical_phrase.lower() == "turn off great room fan"
+    assert result.parsed_target_after_normalization == "break room fan"

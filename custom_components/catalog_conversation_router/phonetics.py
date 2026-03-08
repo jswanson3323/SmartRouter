@@ -6,8 +6,10 @@ import re
 import unicodedata
 
 COMMON_CONFUSIONS: dict[str, str] = {
+    "life": "light",
     "line": "light",
     "lite": "light",
+    "fam": "fan",
     "haul": "hall",
     "moat": "mode",
     "there": "their",

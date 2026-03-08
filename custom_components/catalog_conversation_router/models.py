@@ -116,7 +116,7 @@ class CandidateScore:
     score: float
     action: str | None
     target_name: str
-    detail: dict[str, float]
+    detail: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -128,6 +128,8 @@ class MatchResult:
     top_candidates: list[CandidateScore]
     inferred_action: str | None
     normalized_utterance: str
+    parsed_target_before_normalization: str
+    parsed_target_after_normalization: str
 
 
 @dataclass(slots=True)

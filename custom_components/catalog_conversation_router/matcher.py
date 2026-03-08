@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from .models import CandidateScore, CandidateType, Catalog, MatchResult
-from .phonetics import normalize_text, phonetic_tokens, tokenize
+from .phonetics import normalize_text, phonetic_key, phonetic_tokens, tokenize
 
 ACTION_MAP = {
     "turn on": "turn_on",
@@ -100,7 +100,9 @@ class FuzzyMatcher:
         """Score entity and conversation target candidates."""
         normalized = normalize_text(utterance)
         parsed = self.parse_utterance(utterance)
-        utter_tokens = tokenize(parsed.target_phrase or normalized)
+        parsed_target_before = normalize_text(parsed.target_phrase or normalized)
+        utter_tokens = self._normalize_asr_target_tokens(parsed_target_before)
+        parsed_target_after = " ".join(utter_tokens)
         utter_phonetic = set(phonetic_tokens(utter_tokens))
 
         scores: list[CandidateScore] = []
@@ -118,13 +120,14 @@ class FuzzyMatcher:
                 utter_phonetic=utter_phonetic,
                 target_tokens=target_tokens,
                 target_phonetic=target_phonetic,
-                utter_target_text=parsed.target_phrase,
+                utter_target_text=parsed_target_after,
                 candidate_name=entity.normalized_name,
                 alias_similarity=alias_similarity,
                 action=parsed.action,
                 capabilities=entity.capabilities,
                 area_hint=parsed.area_hint,
                 candidate_area=entity.area,
+                candidate_phrase=entity.normalized_name,
             )
             final_score = self._weighted_score(score_detail)
             scores.append(
@@ -135,7 +138,11 @@ class FuzzyMatcher:
                     score=final_score,
                     action=parsed.action,
                     target_name=entity.name,
-                    detail=score_detail,
+                    detail={
+                        **score_detail,
+                        "parsed_target_before_normalization": parsed_target_before,
+                        "parsed_target_after_normalization": parsed_target_after,
+                    },
                 )
             )
 
@@ -154,13 +161,14 @@ class FuzzyMatcher:
                 utter_phonetic=utter_phonetic,
                 target_tokens=target_tokens,
                 target_phonetic=target_phonetic,
-                utter_target_text=parsed.target_phrase,
+                utter_target_text=parsed_target_after,
                 candidate_name=target.normalized_name,
                 alias_similarity=alias_similarity,
                 action=parsed.action,
                 capabilities=["activate", "query", "set"],
                 area_hint=parsed.area_hint,
                 candidate_area=None,
+                candidate_phrase=target.normalized_name,
             )
             final_score = self._weighted_score(score_detail)
             scores.append(
@@ -171,7 +179,11 @@ class FuzzyMatcher:
                     score=final_score,
                     action=parsed.action,
                     target_name=target.display_name,
-                    detail=score_detail,
+                    detail={
+                        **score_detail,
+                        "parsed_target_before_normalization": parsed_target_before,
+                        "parsed_target_after_normalization": parsed_target_after,
+                    },
                 )
             )
 
@@ -193,15 +205,18 @@ class FuzzyMatcher:
             top_candidates=top,
             inferred_action=parsed.action,
             normalized_utterance=normalized,
+            parsed_target_before_normalization=parsed_target_before,
+            parsed_target_after_normalization=parsed_target_after,
         )
 
     def _weighted_score(self, detail: dict[str, float]) -> float:
         return (
             0.30 * detail["token_similarity"]
-            + 0.20 * detail["phonetic_similarity"]
-            + 0.15 * detail["edit_similarity"]
-            + 0.15 * detail["action_compatibility"]
-            + 0.10 * detail["alias_similarity"]
+            + 0.20 * detail["whole_target_similarity"]
+            + 0.15 * detail["phonetic_similarity"]
+            + 0.10 * detail["edit_similarity"]
+            + 0.10 * detail["action_compatibility"]
+            + 0.05 * detail["alias_similarity"]
             + 0.10 * detail["structure_similarity"]
         )
 
@@ -219,10 +234,12 @@ class FuzzyMatcher:
         capabilities: list[str],
         area_hint: str | None,
         candidate_area: str | None,
+        candidate_phrase: str,
     ) -> dict[str, float]:
         token_similarity = self._token_similarity(utter_tokens, target_tokens)
         phonetic_similarity = self._set_similarity(utter_phonetic, target_phonetic)
         edit_similarity = SequenceMatcher(a=utter_target_text, b=candidate_name).ratio()
+        whole_target_similarity = self._whole_target_similarity(utter_target_text, candidate_phrase)
         action_compatibility = self._action_compatibility(action, capabilities)
         structure_similarity = self._structure_similarity(utter_tokens, target_tokens)
 
@@ -231,6 +248,7 @@ class FuzzyMatcher:
 
         return {
             "token_similarity": token_similarity,
+            "whole_target_similarity": whole_target_similarity,
             "phonetic_similarity": phonetic_similarity,
             "edit_similarity": edit_similarity,
             "action_compatibility": action_compatibility,
@@ -271,6 +289,20 @@ class FuzzyMatcher:
         if prefix == "what is":
             return f"what is {name}"
         return f"{prefix} {name}"
+
+    def _normalize_asr_target_tokens(self, target_phrase: str) -> list[str]:
+        """Normalize likely ASR noun substitutions before scoring."""
+        return tokenize(target_phrase)
+
+    def _whole_target_similarity(self, parsed_target: str, candidate_target: str) -> float:
+        """Compare full target phrases using edit and phonetic phrase similarity."""
+        candidate_normalized = normalize_text(candidate_target)
+        edit_ratio = SequenceMatcher(a=parsed_target, b=candidate_normalized).ratio()
+
+        parsed_phonetic = " ".join(phonetic_key(token) for token in parsed_target.split())
+        candidate_phonetic = " ".join(phonetic_key(token) for token in candidate_normalized.split())
+        phonetic_ratio = SequenceMatcher(a=parsed_phonetic, b=candidate_phonetic).ratio()
+        return (edit_ratio + phonetic_ratio) / 2
 
     def _dedupe_by_canonical_phrase(self, ranked: list[CandidateScore]) -> list[CandidateScore]:
         """Deduplicate by canonical phrase, keeping highest-score candidate for each phrase."""

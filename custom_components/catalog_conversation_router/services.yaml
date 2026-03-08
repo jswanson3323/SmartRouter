@@ -6,7 +6,6 @@ get_catalog_stats:
   name: Get catalog stats
   description: Return catalog revision and item counts for each config entry.
 
-
 test_utterance:
   name: Test utterance
   description: Dry-run an utterance through the routing pipeline without executing actions.
@@ -17,3 +16,13 @@ test_utterance:
       required: true
       selector:
         text:
+    area:
+      name: Area override
+      description: Optional area name to use for area-aware matching during the dry run.
+      required: false
+      selector:
+        text:
+
+dump_catalog:
+  name: Dump catalog
+  description: Return full catalog contents for each config entry.

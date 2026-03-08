@@ -37,6 +37,7 @@ SERVICE_TEST_UTTERANCE: Final = "test_utterance"
 SERVICE_DUMP_CATALOG: Final = "dump_catalog"
 
 ATTR_TEXT: Final = "text"
+ATTR_AREA: Final = "area"
 
 LOGGER_NAME: Final = "custom_components.catalog_conversation_router"
 

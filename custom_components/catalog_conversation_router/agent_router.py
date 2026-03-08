@@ -25,12 +25,14 @@ class AgentRouter:
         matcher: FuzzyMatcher,
         agent_adapter,
         llm_adapter: LLMAdapter,
+        hass: Any,
     ) -> None:
         self._config = config
         self._catalog = catalog_manager
         self._matcher = matcher
         self._agent_adapter = agent_adapter
         self._llm_adapter = llm_adapter
+        self._hass = hass
 
     async def async_route(
         self,
@@ -40,14 +42,20 @@ class AgentRouter:
         conversation_id: str | None,
         context: Any,
         dry_run: bool = False,
+        origin_area: str | None = None,
+        device_id: str | None = None,
+        satellite_id: str | None = None,
     ) -> RouterResult:
         """Run deterministic routing pipeline with bounded attempts."""
         catalog = self._catalog.get_catalog()
-        match_result = self._matcher.match(text, catalog)
+        resolved_origin_area = origin_area or self._resolve_origin_area(device_id=device_id, satellite_id=satellite_id, context=context)
+        match_result = self._matcher.match(text, catalog, origin_area=resolved_origin_area)
         trace = ResolutionTrace(
             original_utterance=text,
             normalized_utterance=match_result.normalized_utterance,
             catalog_revision=catalog.metadata.revision,
+            origin_area=resolved_origin_area,
+            effective_area_hint=match_result.effective_area_hint,
         )
 
         # 1) exact local attempt
@@ -181,3 +189,52 @@ class AgentRouter:
         trace.selected_path = ResolutionPath.FAILED
         trace.final_executor = "none"
         return RouterResult(path=ResolutionPath.FAILED, outcome=exact, trace=trace)
+
+    def _resolve_origin_area(
+        self,
+        *,
+        device_id: str | None,
+        satellite_id: str | None,
+        context: Any,
+    ) -> str | None:
+        """Best-effort resolve the area associated with the utterance origin."""
+        try:
+            from homeassistant.helpers import area_registry as ar
+            from homeassistant.helpers import device_registry as dr
+            from homeassistant.helpers import entity_registry as er
+        except Exception:
+            return None
+
+        area_reg = ar.async_get(self._hass)
+        device_reg = dr.async_get(self._hass)
+        entity_reg = er.async_get(self._hass)
+
+        def _area_name_for_device_id(candidate_device_id: str | None) -> str | None:
+            if not candidate_device_id:
+                return None
+            device = device_reg.async_get(candidate_device_id)
+            if device is None or not getattr(device, 'area_id', None):
+                return None
+            area = area_reg.async_get_area(device.area_id)
+            return area.name if area else None
+
+        def _device_id_for_entity_id(entity_id: str | None) -> str | None:
+            if not entity_id:
+                return None
+            entry = entity_reg.async_get(entity_id)
+            return getattr(entry, 'device_id', None) if entry else None
+
+        area_name = _area_name_for_device_id(device_id)
+        if area_name:
+            return area_name
+
+        area_name = _area_name_for_device_id(_device_id_for_entity_id(satellite_id))
+        if area_name:
+            return area_name
+
+        context_device_id = getattr(context, 'device_id', None)
+        area_name = _area_name_for_device_id(context_device_id)
+        if area_name:
+            return area_name
+
+        return None

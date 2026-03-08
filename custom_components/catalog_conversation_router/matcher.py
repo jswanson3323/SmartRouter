@@ -105,7 +105,7 @@ class FuzzyMatcher:
             area_hint=area_hint,
         )
 
-    def match(self, utterance: str, catalog: Catalog) -> MatchResult:
+    def match(self, utterance: str, catalog: Catalog, origin_area: str | None = None) -> MatchResult:
         """Score entity and conversation target candidates."""
         normalized = normalize_text(utterance)
         parsed = self.parse_utterance(utterance)
@@ -115,6 +115,7 @@ class FuzzyMatcher:
         utter_phonetic = set(phonetic_tokens(utter_tokens))
         utter_full_tokens = tokenize(normalized)
         utter_full_phonetic = set(phonetic_tokens(utter_full_tokens))
+        effective_area_hint = parsed.area_hint or (normalize_text(origin_area) if origin_area else None)
 
         scores: list[CandidateScore] = []
 
@@ -136,7 +137,7 @@ class FuzzyMatcher:
                 alias_similarity=alias_similarity,
                 action=parsed.action,
                 capabilities=entity.capabilities,
-                area_hint=parsed.area_hint,
+                area_hint=effective_area_hint,
                 candidate_area=entity.area,
                 candidate_phrase=entity.normalized_name,
             )
@@ -201,7 +202,7 @@ class FuzzyMatcher:
                     alias_similarity=alias_similarity,
                     action=parsed.action,
                     capabilities=self._infer_phrase_capabilities(normalized_phrase),
-                    area_hint=parsed.area_hint,
+                    area_hint=effective_area_hint,
                     candidate_area=None,
                     candidate_phrase=scoring_phrase,
                 )
@@ -240,7 +241,7 @@ class FuzzyMatcher:
                 alias_similarity=alias_similarity,
                 action=parsed.action,
                 capabilities=self._infer_phrase_capabilities(best_phrase),
-                area_hint=parsed.area_hint,
+                area_hint=effective_area_hint,
                 candidate_area=None,
                 candidate_phrase=best_phrase,
             )
@@ -299,6 +300,8 @@ class FuzzyMatcher:
             normalized_utterance=normalized,
             parsed_target_before_normalization=parsed_target_before,
             parsed_target_after_normalization=parsed_target_after,
+            origin_area=origin_area,
+            effective_area_hint=effective_area_hint,
         )
 
     def _weighted_score(self, detail: dict[str, float]) -> float:
@@ -335,8 +338,14 @@ class FuzzyMatcher:
         action_compatibility = self._action_compatibility(action, capabilities)
         structure_similarity = self._structure_similarity(utter_tokens, target_tokens)
 
-        if area_hint and candidate_area and area_hint in candidate_area.lower():
-            structure_similarity = min(1.0, structure_similarity + 0.10)
+        if area_hint and candidate_area:
+            normalized_candidate_area = normalize_text(candidate_area)
+            area_tokens = set(tokenize(area_hint))
+            candidate_area_tokens = set(tokenize(normalized_candidate_area))
+            if area_tokens and area_tokens <= candidate_area_tokens:
+                structure_similarity = min(1.0, structure_similarity + 0.25)
+                token_similarity = min(1.0, token_similarity + 0.15)
+                phonetic_similarity = min(1.0, phonetic_similarity + 0.10)
 
         return {
             "token_similarity": token_similarity,

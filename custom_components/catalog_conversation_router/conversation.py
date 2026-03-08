@@ -55,6 +55,8 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
             conversation_id=user_input.conversation_id,
             context=user_input.context,
             dry_run=False,
+            device_id=getattr(user_input, "device_id", None),
+            satellite_id=getattr(user_input, "satellite_id", None),
         )
 
         if result.trace:

@@ -130,6 +130,8 @@ class MatchResult:
     normalized_utterance: str
     parsed_target_before_normalization: str
     parsed_target_after_normalization: str
+    origin_area: str | None = None
+    effective_area_hint: str | None = None
 
 
 @dataclass(slots=True)
@@ -171,6 +173,8 @@ class ResolutionTrace:
     exact_local_response_type: str | None = None
     exact_local_error_code: str | None = None
     exact_local_processed_locally: bool | None = None
+    origin_area: str | None = None
+    effective_area_hint: str | None = None
     failure_category: str | None = None
     top_fuzzy_candidates: list[dict[str, Any]] = field(default_factory=list)
     chosen_canonical_phrase: str | None = None

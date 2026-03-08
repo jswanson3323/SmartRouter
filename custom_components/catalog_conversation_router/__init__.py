@@ -120,6 +120,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         matcher=matcher,
         agent_adapter=agent_adapter,
         llm_adapter=llm_adapter,
+        hass=hass,
     )
     conv_agent = CatalogRouterConversationAgent(router=router, language=cfg.language)
 

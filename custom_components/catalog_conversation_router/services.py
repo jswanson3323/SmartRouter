@@ -8,6 +8,7 @@ from typing import Any
 import voluptuous as vol
 
 from .const import (
+    ATTR_AREA,
     ATTR_TEXT,
     DOMAIN,
     SERVICE_DUMP_CATALOG,
@@ -40,6 +41,7 @@ async def async_register_services(hass) -> None:
 
     async def _test_utterance(call) -> dict[str, Any]:
         text = call.data[ATTR_TEXT]
+        origin_area = call.data.get(ATTR_AREA)
         output: dict[str, Any] = {}
         for entry_id, runtime in hass.data.get(DOMAIN, {}).items():
             result = await runtime.router.async_route(
@@ -48,6 +50,7 @@ async def async_register_services(hass) -> None:
                 conversation_id=None,
                 context=call.context,
                 dry_run=True,
+                origin_area=origin_area,
             )
             output[entry_id] = {
                 "path": result.path.value,
@@ -105,7 +108,7 @@ async def async_register_services(hass) -> None:
 
     stats_schema = vol.Schema({})
     dump_schema = vol.Schema({})
-    test_schema = vol.Schema({vol.Required(ATTR_TEXT): str})
+    test_schema = vol.Schema({vol.Required(ATTR_TEXT): str, vol.Optional(ATTR_AREA): str})
 
     if SupportsResponse is not None:
         if not hass.services.has_service(DOMAIN, SERVICE_GET_CATALOG_STATS):

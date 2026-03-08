@@ -191,7 +191,7 @@ class FuzzyMatcher:
                     utter_phonetic=utter_phonetic,
                     target_tokens=phrase_tokens,
                     target_phonetic=phrase_phonetic,
-                    utter_target_text=parsed_target_after,
+                    utter_target_text=normalized,
                     candidate_name=scoring_phrase,
                     alias_similarity=alias_similarity,
                     action=parsed.action,
@@ -215,7 +215,7 @@ class FuzzyMatcher:
                 utter_phonetic=utter_phonetic,
                 target_tokens=best_target_tokens,
                 target_phonetic=best_target_phonetic,
-                utter_target_text=parsed_target_after,
+                utter_target_text=normalized,
                 candidate_name=best_phrase,
                 alias_similarity=alias_similarity,
                 action=parsed.action,
@@ -413,13 +413,13 @@ class FuzzyMatcher:
         This strips slot placeholders and optional markers so matching is based on
         the fixed words a user is likely to say.
         """
-        normalized = normalize_text(phrase)
+        working = phrase.lower()
 
-        # Replace slot placeholders with a neutral separator.
-        normalized = re.sub(r"\{[^}]+\}", " ", normalized)
+        # Replace slot placeholders before punctuation/brace normalization.
+        working = re.sub(r"\{[^}]+\}", " ", working)
 
         # Remove optional markers while keeping the inner text.
-        normalized = normalized.replace("[", " ").replace("]", " ")
+        working = working.replace("[", " ").replace("]", " ")
 
         # Reduce alternation groups like `(alarm | timer | reminder)` to their options.
         def _replace_alternation(match: re.Match[str]) -> str:
@@ -428,13 +428,17 @@ class FuzzyMatcher:
             options = [option for option in options if option]
             if not options:
                 return " "
-            # Keep all option words so token overlap can still help matching.
             return " " + " ".join(options) + " "
 
-        normalized = re.sub(r"\(([^)]+)\)", _replace_alternation, normalized)
+        working = re.sub(r"\(([^)]+)\)", _replace_alternation, working)
+        working = normalize_text(working)
 
-        # Drop filler determiners that often appear only because of sentence syntax.
-        tokens = [token for token in tokenize(normalized) if token not in {"a", "an", "the", "my"}]
+        # Drop filler determiners and common placeholder names that can leak into scoring.
+        tokens = [
+            token
+            for token in tokenize(working)
+            if token not in {"a", "an", "the", "my", "when", "amount", "name"}
+        ]
         return " ".join(tokens)
 
     def _build_entity_canonical(self, action: str | None, name: str) -> str:

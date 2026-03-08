@@ -158,26 +158,66 @@ class FuzzyMatcher:
         for target in catalog.conversation_targets:
             if not target.enabled:
                 continue
-            target_tokens = target.tokens
-            target_phonetic = set(target.phonetic_tokens)
+
             alias_scores = [
                 self._token_similarity(utter_tokens, tokenize(alias)) for alias in target.aliases
             ]
             alias_similarity = max(alias_scores) if alias_scores else 0.0
 
-            score_detail = self._score_signals(
+            phrase_candidates = [
+                phrase
+                for phrase in [*target.sample_phrases, target.canonical_phrase, target.display_name]
+                if phrase
+            ]
+            if not phrase_candidates:
+                phrase_candidates = [target.display_name]
+
+            best_phrase = normalize_text(target.display_name)
+            best_target_tokens = target.tokens
+            best_target_phonetic = set(target.phonetic_tokens)
+            best_score_detail: dict[str, float] | None = None
+            best_phrase_score = -1.0
+
+            for phrase in phrase_candidates:
+                normalized_phrase = normalize_text(phrase)
+                phrase_tokens = tokenize(normalized_phrase)
+                phrase_phonetic = set(phonetic_tokens(phrase_tokens))
+
+                score_detail = self._score_signals(
+                    utter_tokens=utter_tokens,
+                    utter_phonetic=utter_phonetic,
+                    target_tokens=phrase_tokens,
+                    target_phonetic=phrase_phonetic,
+                    utter_target_text=parsed_target_after,
+                    candidate_name=normalized_phrase,
+                    alias_similarity=alias_similarity,
+                    action=parsed.action,
+                    capabilities=["activate", "query", "set"],
+                    area_hint=parsed.area_hint,
+                    candidate_area=None,
+                    candidate_phrase=normalized_phrase,
+                )
+                phrase_score = self._weighted_score(score_detail)
+                if phrase_score > best_phrase_score:
+                    best_phrase_score = phrase_score
+                    best_phrase = normalized_phrase
+                    best_target_tokens = phrase_tokens
+                    best_target_phonetic = phrase_phonetic
+                    best_score_detail = score_detail
+
+            score_detail = best_score_detail or self._score_signals(
                 utter_tokens=utter_tokens,
                 utter_phonetic=utter_phonetic,
-                target_tokens=target_tokens,
-                target_phonetic=target_phonetic,
+                target_tokens=best_target_tokens,
+                target_phonetic=best_target_phonetic,
                 utter_target_text=parsed_target_after,
-                candidate_name=target.normalized_name,
+                candidate_name=best_phrase,
                 alias_similarity=alias_similarity,
                 action=parsed.action,
                 capabilities=["activate", "query", "set"],
                 area_hint=parsed.area_hint,
                 candidate_area=None,
-                candidate_phrase=target.normalized_name,
+                candidate_phrase=best_phrase,
             )
             final_score = self._weighted_score(score_detail)
             scores.append(
@@ -190,6 +230,7 @@ class FuzzyMatcher:
                     target_name=target.display_name,
                     detail={
                         **score_detail,
+                        "matched_sample_phrase": best_phrase,
                         "parsed_target_before_normalization": parsed_target_before,
                         "parsed_target_after_normalization": parsed_target_after,
                     },

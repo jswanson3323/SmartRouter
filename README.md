@@ -75,6 +75,10 @@ Use the options flow `manual_targets_json` field with a JSON list:
 ]
 ```
 
+Manual targets are the primary reliable mechanism for custom conversation targets in v1.
+Runtime discovery from `intent_script` and automation sentence triggers is best-effort and depends
+on whether the running Home Assistant version exposes the required metadata at runtime.
+
 ## Services
 
 - `catalog_conversation_router.rebuild_catalog`
@@ -95,6 +99,7 @@ Enable `debug_enabled` to include routing traces in logs, including:
 ## Known Limitations
 
 - Discovery of custom-sentence and intent-script targets is best-effort and may vary by HA version/configuration.
+- In v1, manual conversation targets are recommended for predictable custom-target behavior.
 - Exact HA conversation response internals can vary by conversation agent implementation.
 - Some high-risk commands are intentionally blocked from weak fuzzy correction.
 

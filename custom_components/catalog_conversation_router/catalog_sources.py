@@ -292,10 +292,12 @@ class ConversationTargetSource:
     async def _from_intent_script(self, hass: Any) -> list[ConversationTarget]:
         data: list[ConversationTarget] = []
         intent_domain = hass.data.get("intent_script")
+        _LOGGER.debug("Intent script discovery: intent_script_domain_exists=%s", bool(intent_domain))
         if not intent_domain:
             return data
 
         scripts = intent_domain.get("intent_scripts") or {}
+        _LOGGER.debug("Intent script discovery: intent_script_count=%s", len(scripts))
         for intent_name, script in scripts.items():
             sample = intent_name.replace("_", " ").lower()
             canonical = f"{sample}"
@@ -313,18 +315,41 @@ class ConversationTargetSource:
                     phonetic_tokens=phonetic_tokens(tokenize(intent_name)),
                 )
             )
+        _LOGGER.debug("Intent script discovery: conversation_targets_built=%s", len(data))
         return data
 
     async def _from_sentence_automations(self, hass: Any) -> list[ConversationTarget]:
         data: list[ConversationTarget] = []
-        for state in hass.states.async_all("automation"):
-            triggers = state.attributes.get("triggers") or []
+        automation_states = list(hass.states.async_all("automation"))
+        _LOGGER.debug("Automation sentence discovery: automation_state_count=%s", len(automation_states))
+
+        trigger_attr_present = 0
+        sentence_trigger_count = 0
+
+        for state in automation_states:
+            has_triggers_attr = "triggers" in state.attributes
+            if has_triggers_attr:
+                trigger_attr_present += 1
+
+            triggers = state.attributes.get("triggers")
+            if not isinstance(triggers, list):
+                # In some HA versions trigger metadata is not exposed on runtime state attributes.
+                # Keep this path conservative and skip without inventing targets.
+                _LOGGER.debug(
+                    "Automation sentence discovery: entity_id=%s has_triggers_attr=%s usable=%s",
+                    state.entity_id,
+                    has_triggers_attr,
+                    False,
+                )
+                continue
+
             for idx, trigger in enumerate(triggers):
                 if trigger.get("trigger") not in {"conversation", "sentence"}:
                     continue
                 sentence = trigger.get("command") or trigger.get("sentence")
                 if not sentence:
                     continue
+                sentence_trigger_count += 1
                 display_name = state.name or state.entity_id
                 tokens = tokenize(display_name + " " + sentence)
                 data.append(
@@ -341,6 +366,13 @@ class ConversationTargetSource:
                         phonetic_tokens=phonetic_tokens(tokens),
                     )
                 )
+        _LOGGER.debug(
+            "Automation sentence discovery: trigger_attr_present_count=%s sentence_trigger_count=%s "
+            "conversation_targets_built=%s",
+            trigger_attr_present,
+            sentence_trigger_count,
+            len(data),
+        )
         return data
 
 

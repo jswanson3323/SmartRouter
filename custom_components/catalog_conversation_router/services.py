@@ -10,6 +10,7 @@ import voluptuous as vol
 from .const import (
     ATTR_TEXT,
     DOMAIN,
+    SERVICE_DUMP_CATALOG,
     SERVICE_GET_CATALOG_STATS,
     SERVICE_REBUILD_CATALOG,
     SERVICE_TEST_UTTERANCE,
@@ -54,6 +55,46 @@ async def async_register_services(hass) -> None:
             }
         return {"entries": output}
 
+    async def _dump_catalog(call) -> dict[str, Any]:
+        output: dict[str, Any] = {}
+        for entry_id, runtime in hass.data.get(DOMAIN, {}).items():
+            catalog = runtime.catalog_manager.get_catalog()
+            output[entry_id] = {
+                "stats": runtime.catalog_manager.stats(),
+                "entity_targets": [
+                    {
+                        "entity_id": target.entity_id,
+                        "name": target.name,
+                        "domain": target.domain,
+                        "area": target.area,
+                        "floor": target.floor,
+                        "device_name": target.device_name,
+                        "aliases": list(target.aliases),
+                        "capabilities": list(target.capabilities),
+                        "tokens": list(target.tokens),
+                        "phonetic_tokens": list(target.phonetic_tokens),
+                    }
+                    for target in catalog.entity_targets
+                ],
+                "conversation_targets": [
+                    {
+                        "target_id": target.target_id,
+                        "type": target.type,
+                        "display_name": target.display_name,
+                        "canonical_phrase": target.canonical_phrase,
+                        "sample_phrases": list(target.sample_phrases),
+                        "source": target.source,
+                        "slots": list(target.slots),
+                        "aliases": list(target.aliases),
+                        "enabled": target.enabled,
+                        "tokens": list(target.tokens),
+                        "phonetic_tokens": list(target.phonetic_tokens),
+                    }
+                    for target in catalog.conversation_targets
+                ],
+            }
+        return {"entries": output}
+
     if not hass.services.has_service(DOMAIN, SERVICE_REBUILD_CATALOG):
         hass.services.async_register(
             DOMAIN,
@@ -63,6 +104,7 @@ async def async_register_services(hass) -> None:
         )
 
     stats_schema = vol.Schema({})
+    dump_schema = vol.Schema({})
     test_schema = vol.Schema({vol.Required(ATTR_TEXT): str})
 
     if SupportsResponse is not None:
@@ -82,6 +124,14 @@ async def async_register_services(hass) -> None:
                 schema=test_schema,
                 supports_response=SupportsResponse.ONLY,
             )
+        if not hass.services.has_service(DOMAIN, SERVICE_DUMP_CATALOG):
+            hass.services.async_register(
+                DOMAIN,
+                SERVICE_DUMP_CATALOG,
+                _dump_catalog,
+                schema=dump_schema,
+                supports_response=SupportsResponse.ONLY,
+            )
     else:  # pragma: no cover
         _LOGGER.warning("SupportsResponse not available; response services downgraded")
         if not hass.services.has_service(DOMAIN, SERVICE_GET_CATALOG_STATS):
@@ -98,6 +148,13 @@ async def async_register_services(hass) -> None:
                 _test_utterance,
                 schema=test_schema,
             )
+        if not hass.services.has_service(DOMAIN, SERVICE_DUMP_CATALOG):
+            hass.services.async_register(
+                DOMAIN,
+                SERVICE_DUMP_CATALOG,
+                _dump_catalog,
+                schema=dump_schema,
+            )
 
 
 async def async_unregister_services(hass) -> None:
@@ -106,6 +163,7 @@ async def async_unregister_services(hass) -> None:
         SERVICE_REBUILD_CATALOG,
         SERVICE_GET_CATALOG_STATS,
         SERVICE_TEST_UTTERANCE,
+        SERVICE_DUMP_CATALOG,
     ):
         if hass.services.has_service(DOMAIN, service):
             hass.services.async_remove(DOMAIN, service)

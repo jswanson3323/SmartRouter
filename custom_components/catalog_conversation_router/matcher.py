@@ -177,10 +177,13 @@ class FuzzyMatcher:
             best_target_phonetic = set(target.phonetic_tokens)
             best_score_detail: dict[str, float] | None = None
             best_phrase_score = -1.0
+            best_phrase_raw = target.display_name
+            best_phrase_for_scoring = normalize_text(target.display_name)
 
             for phrase in phrase_candidates:
                 normalized_phrase = normalize_text(phrase)
-                phrase_tokens = tokenize(normalized_phrase)
+                scoring_phrase = self._normalize_conversation_phrase_for_scoring(phrase)
+                phrase_tokens = tokenize(scoring_phrase)
                 phrase_phonetic = set(phonetic_tokens(phrase_tokens))
 
                 score_detail = self._score_signals(
@@ -189,18 +192,20 @@ class FuzzyMatcher:
                     target_tokens=phrase_tokens,
                     target_phonetic=phrase_phonetic,
                     utter_target_text=parsed_target_after,
-                    candidate_name=normalized_phrase,
+                    candidate_name=scoring_phrase,
                     alias_similarity=alias_similarity,
                     action=parsed.action,
                     capabilities=self._infer_phrase_capabilities(normalized_phrase),
                     area_hint=parsed.area_hint,
                     candidate_area=None,
-                    candidate_phrase=normalized_phrase,
+                    candidate_phrase=scoring_phrase,
                 )
                 phrase_score = self._weighted_score(score_detail)
                 if phrase_score > best_phrase_score:
                     best_phrase_score = phrase_score
                     best_phrase = normalized_phrase
+                    best_phrase_raw = phrase
+                    best_phrase_for_scoring = scoring_phrase
                     best_target_tokens = phrase_tokens
                     best_target_phonetic = phrase_phonetic
                     best_score_detail = score_detail
@@ -231,6 +236,8 @@ class FuzzyMatcher:
                     detail={
                         **score_detail,
                         "matched_sample_phrase": best_phrase,
+                        "matched_sample_phrase_raw": best_phrase_raw,
+                        "matched_sample_phrase_normalized_for_scoring": best_phrase_for_scoring,
                         "parsed_target_before_normalization": parsed_target_before,
                         "parsed_target_after_normalization": parsed_target_after,
                     },
@@ -399,6 +406,36 @@ class FuzzyMatcher:
         )
         first_token_bonus = 0.2 if utter_tokens[0] == target_tokens[0] else 0.0
         return min(1.0, ratio + first_token_bonus)
+
+    def _normalize_conversation_phrase_for_scoring(self, phrase: str) -> str:
+        """Normalize Home Assistant sentence syntax for fuzzy scoring.
+
+        This strips slot placeholders and optional markers so matching is based on
+        the fixed words a user is likely to say.
+        """
+        normalized = normalize_text(phrase)
+
+        # Replace slot placeholders with a neutral separator.
+        normalized = re.sub(r"\{[^}]+\}", " ", normalized)
+
+        # Remove optional markers while keeping the inner text.
+        normalized = normalized.replace("[", " ").replace("]", " ")
+
+        # Reduce alternation groups like `(alarm | timer | reminder)` to their options.
+        def _replace_alternation(match: re.Match[str]) -> str:
+            content = match.group(1)
+            options = [normalize_text(part) for part in content.split("|")]
+            options = [option for option in options if option]
+            if not options:
+                return " "
+            # Keep all option words so token overlap can still help matching.
+            return " " + " ".join(options) + " "
+
+        normalized = re.sub(r"\(([^)]+)\)", _replace_alternation, normalized)
+
+        # Drop filler determiners that often appear only because of sentence syntax.
+        tokens = [token for token in tokenize(normalized) if token not in {"a", "an", "the", "my"}]
+        return " ".join(tokens)
 
     def _build_entity_canonical(self, action: str | None, name: str) -> str:
         prefix = CANONICAL_ACTION_TEXT.get(action or "", "activate")

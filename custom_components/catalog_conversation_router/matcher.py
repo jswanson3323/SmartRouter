@@ -205,6 +205,21 @@ class FuzzyMatcher:
                     candidate_area=None,
                     candidate_phrase=scoring_phrase,
                 )
+                score_detail["token_similarity"] = max(
+                    score_detail["token_similarity"],
+                    self._target_token_coverage_similarity(utter_full_tokens, phrase_tokens),
+                )
+                score_detail["phonetic_similarity"] = max(
+                    score_detail["phonetic_similarity"],
+                    self._target_token_coverage_similarity(
+                        list(utter_full_phonetic),
+                        list(phrase_phonetic),
+                    ),
+                )
+                score_detail["structure_similarity"] = max(
+                    score_detail["structure_similarity"],
+                    self._ordered_token_subsequence_similarity(utter_full_tokens, phrase_tokens),
+                )
                 phrase_score = self._weighted_score(score_detail)
                 if phrase_score > best_phrase_score:
                     best_phrase_score = phrase_score
@@ -228,6 +243,21 @@ class FuzzyMatcher:
                 area_hint=parsed.area_hint,
                 candidate_area=None,
                 candidate_phrase=best_phrase,
+            )
+            score_detail["token_similarity"] = max(
+                score_detail["token_similarity"],
+                self._target_token_coverage_similarity(utter_full_tokens, best_target_tokens),
+            )
+            score_detail["phonetic_similarity"] = max(
+                score_detail["phonetic_similarity"],
+                self._target_token_coverage_similarity(
+                    list(utter_full_phonetic),
+                    list(best_target_phonetic),
+                ),
+            )
+            score_detail["structure_similarity"] = max(
+                score_detail["structure_similarity"],
+                self._ordered_token_subsequence_similarity(utter_full_tokens, best_target_tokens),
             )
             final_score = self._weighted_score(score_detail)
             scores.append(
@@ -320,6 +350,40 @@ class FuzzyMatcher:
 
     def _token_similarity(self, left: list[str], right: list[str]) -> float:
         return self._set_similarity(set(left), set(right))
+
+    def _target_token_coverage_similarity(self, utter_tokens: list[str], target_tokens: list[str]) -> float:
+        """How completely the target tokens are covered by the utterance.
+
+        This is useful for slot-based conversation phrases like `set timer for`,
+        where the utterance may contain extra slot words that should not heavily
+        penalize the score.
+        """
+        if not target_tokens:
+            return 0.0
+        utter_set = set(utter_tokens)
+        target_set = set(target_tokens)
+        return len(utter_set & target_set) / len(target_set)
+
+    def _ordered_token_subsequence_similarity(self, utter_tokens: list[str], target_tokens: list[str]) -> float:
+        """Reward phrases whose fixed tokens appear in utterance order."""
+        if not utter_tokens or not target_tokens:
+            return 0.0
+
+        filtered_target = [token for token in target_tokens if token not in {"a", "an", "the", "my"}]
+        if not filtered_target:
+            return 0.0
+
+        utter_index = 0
+        matched = 0
+        for target_token in filtered_target:
+            while utter_index < len(utter_tokens) and utter_tokens[utter_index] != target_token:
+                utter_index += 1
+            if utter_index >= len(utter_tokens):
+                break
+            matched += 1
+            utter_index += 1
+
+        return matched / len(filtered_target)
 
     def _set_similarity(self, left: set[str], right: set[str]) -> float:
         if not left or not right:

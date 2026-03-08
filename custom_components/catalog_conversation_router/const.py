@@ -35,9 +35,11 @@ SERVICE_REBUILD_CATALOG: Final = "rebuild_catalog"
 SERVICE_GET_CATALOG_STATS: Final = "get_catalog_stats"
 SERVICE_TEST_UTTERANCE: Final = "test_utterance"
 SERVICE_DUMP_CATALOG: Final = "dump_catalog"
+SERVICE_DUMP_CATALOG_TO_FILE: Final = "dump_catalog_to_file"
 
 ATTR_TEXT: Final = "text"
 ATTR_AREA: Final = "area"
+ATTR_PATH: Final = "path"
 
 LOGGER_NAME: Final = "custom_components.catalog_conversation_router"
 

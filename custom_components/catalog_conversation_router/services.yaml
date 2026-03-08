@@ -26,3 +26,15 @@ test_utterance:
 dump_catalog:
   name: Dump catalog
   description: Return full catalog contents for each config entry.
+
+
+dump_catalog_to_file:
+  name: Dump catalog to file
+  description: Write the full catalog contents for each config entry to a JSON file under /config.
+  fields:
+    path:
+      name: File name
+      description: Optional file name to write under /config. Defaults to catalog_router_catalog.json.
+      required: false
+      selector:
+        text:

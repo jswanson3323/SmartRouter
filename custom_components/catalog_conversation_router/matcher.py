@@ -153,11 +153,22 @@ class FuzzyMatcher:
                     list(target_phonetic),
                 ),
             )
-            if effective_area_hint and entity.area and entity_target_similarity > 0:
-                score_detail["structure_similarity"] = min(
-                    1.0,
-                    score_detail["structure_similarity"] + 0.15,
-                )
+            domain_hint_match = self._domain_hint_match(utter_tokens, entity.domain, entity.name, entity.aliases)
+            if domain_hint_match > 0:
+                score_detail["token_similarity"] = min(1.0, score_detail["token_similarity"] + domain_hint_match)
+                score_detail["structure_similarity"] = min(1.0, score_detail["structure_similarity"] + 0.1)
+
+            if effective_area_hint and entity.area:
+                candidate_area_tokens = set(tokenize(normalize_text(entity.area)))
+                hint_tokens = set(tokenize(effective_area_hint))
+                area_match = 1.0 if hint_tokens and hint_tokens <= candidate_area_tokens else 0.0
+                if area_match > 0 and (entity_target_similarity > 0 or domain_hint_match > 0):
+                    score_detail["structure_similarity"] = min(1.0, score_detail["structure_similarity"] + 0.3)
+                    score_detail["token_similarity"] = min(1.0, score_detail["token_similarity"] + 0.2)
+                    score_detail["phonetic_similarity"] = min(1.0, score_detail["phonetic_similarity"] + 0.1)
+                elif area_match == 0 and (entity_target_similarity > 0 or domain_hint_match > 0):
+                    score_detail["structure_similarity"] = max(0.0, score_detail["structure_similarity"] - 0.1)
+
             final_score = self._weighted_score(score_detail)
             scores.append(
                 CandidateScore(
@@ -251,12 +262,13 @@ class FuzzyMatcher:
                     if conversation_target_similarity == 0.0:
                         score_detail["action_compatibility"] = min(
                             score_detail["action_compatibility"],
-                            0.15,
+                            0.0 if parsed.action in {"turn_on", "turn_off", "set", "open", "close", "lock", "unlock"} else 0.15,
                         )
                         score_detail["structure_similarity"] = min(
                             score_detail["structure_similarity"],
-                            0.35,
+                            0.15 if parsed.action in {"turn_on", "turn_off", "set", "open", "close", "lock", "unlock"} else 0.35,
                         )
+                        score_detail["whole_target_similarity"] = min(score_detail["whole_target_similarity"], 0.25)
                 phrase_score = self._weighted_score(score_detail)
                 if phrase_score > best_phrase_score:
                     best_phrase_score = phrase_score
@@ -490,6 +502,35 @@ class FuzzyMatcher:
             "to",
         }
         return [token for token in tokens if token not in stopwords]
+
+
+    def _domain_hint_match(
+        self,
+        utter_tokens: list[str],
+        domain: str,
+        entity_name: str,
+        aliases: list[str],
+    ) -> float:
+        """Detect generic domain nouns like fan/light/tv in the utterance."""
+        hint_map = {
+            "fan": {"fan", "fans"},
+            "light": {"light", "lights", "lamp", "lamps"},
+            "switch": {"switch", "switches", "outlet", "outlets", "plug", "plugs"},
+            "media_player": {"tv", "television", "speaker", "stereo", "receiver", "media"},
+            "cover": {"blind", "blinds", "shade", "shades", "cover", "covers", "curtain", "curtains"},
+            "climate": {"thermostat", "heater", "ac", "climate", "temperature"},
+        }
+        utter_set = set(utter_tokens)
+        domain_terms = hint_map.get(domain, set())
+        if utter_set & domain_terms:
+            return 0.25
+
+        names = [normalize_text(entity_name), *[normalize_text(alias) for alias in aliases]]
+        for name in names:
+            name_tokens = set(tokenize(name))
+            if name_tokens & utter_set & domain_terms:
+                return 0.2
+        return 0.0
 
     def _set_similarity(self, left: set[str], right: set[str]) -> float:
         if not left or not right:

@@ -1,0 +1,19 @@
+rebuild_catalog:
+  name: Rebuild catalog
+  description: Force a full catalog rebuild for all configured entries.
+
+get_catalog_stats:
+  name: Get catalog stats
+  description: Return catalog revision and item counts for each config entry.
+
+
+test_utterance:
+  name: Test utterance
+  description: Dry-run an utterance through the routing pipeline without executing actions.
+  fields:
+    text:
+      name: Text
+      description: User utterance to test.
+      required: true
+      selector:
+        text:

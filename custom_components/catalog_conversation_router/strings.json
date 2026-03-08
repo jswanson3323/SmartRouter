@@ -1,0 +1,53 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Catalog Conversation Router",
+        "description": "Select local and LLM conversation agents plus routing behavior.",
+        "data": {
+          "local_agent_id": "Local agent ID",
+          "llm_agent_id": "LLM agent ID",
+          "language": "Language",
+          "fuzzy_enabled": "Enable fuzzy matching",
+          "fuzzy_threshold": "Fuzzy threshold",
+          "ambiguity_gap": "Ambiguity gap",
+          "llm_translate_enabled": "Enable LLM translation for local",
+          "llm_fallback_enabled": "Enable final LLM fallback",
+          "debug_enabled": "Enable debug traces",
+          "catalog_auto_refresh_enabled": "Enable catalog auto-refresh",
+          "high_risk_threshold": "High-risk confidence threshold",
+          "max_llm_candidates": "Max candidates sent to LLM"
+        }
+      }
+    },
+    "error": {
+      "agent_required": "Both local and LLM agent IDs are required.",
+      "agents_must_differ": "Local and LLM agents must be different.",
+      "invalid_config": "Invalid configuration."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Catalog Conversation Router Options",
+        "description": "Update matcher behavior and manual conversation targets.",
+        "data": {
+          "fuzzy_enabled": "Enable fuzzy matching",
+          "fuzzy_threshold": "Fuzzy threshold",
+          "ambiguity_gap": "Ambiguity gap",
+          "llm_translate_enabled": "Enable LLM translation for local",
+          "llm_fallback_enabled": "Enable final LLM fallback",
+          "debug_enabled": "Enable debug traces",
+          "catalog_auto_refresh_enabled": "Enable catalog auto-refresh",
+          "high_risk_threshold": "High-risk confidence threshold",
+          "max_llm_candidates": "Max candidates sent to LLM",
+          "manual_targets_json": "Manual targets JSON"
+        }
+      }
+    },
+    "error": {
+      "invalid_manual_targets": "Manual targets must be a JSON list of objects.",
+      "agents_must_differ": "Local and LLM agents must be different."
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Catalog Conversation Router",
+  "render_readme": true,
+  "domains": [
+    "conversation"
+  ],
+  "homeassistant": ">=2024.6.0"
+}

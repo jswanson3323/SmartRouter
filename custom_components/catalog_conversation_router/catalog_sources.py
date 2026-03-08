@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from collections.abc import Iterable
 from typing import Any
 
@@ -49,13 +50,36 @@ class EntityCatalogSource:
             device_reg = dr.async_get(hass)
             entity_reg = er.async_get(hass)
             floor_reg = fr.async_get(hass)
+            exposure_checker = await _async_build_exposure_checker(hass)
 
             for entry in entity_reg.entities.values():
-                if (
-                    entry.disabled_by is not None
-                    or entry.hidden_by is not None
-                    or entry.exposed_by is None
-                ):
+                if entry.disabled_by is not None or entry.hidden_by is not None:
+                    _LOGGER.debug(
+                        "Entity exposure check: entity_id=%s exposed_by=%s hidden_by=%s "
+                        "disabled_by=%s included=%s reason=%s",
+                        entry.entity_id,
+                        getattr(entry, "exposed_by", None),
+                        entry.hidden_by,
+                        entry.disabled_by,
+                        False,
+                        "hidden_or_disabled",
+                    )
+                    continue
+
+                is_exposed = await _async_is_exposed_to_assist(
+                    entry=entry,
+                    checker=exposure_checker,
+                )
+                _LOGGER.debug(
+                    "Entity exposure check: entity_id=%s exposed_by=%s hidden_by=%s "
+                    "disabled_by=%s included=%s",
+                    entry.entity_id,
+                    getattr(entry, "exposed_by", None),
+                    entry.hidden_by,
+                    entry.disabled_by,
+                    is_exposed,
+                )
+                if not is_exposed:
                     continue
 
                 included_entity_ids.add(entry.entity_id)
@@ -113,6 +137,46 @@ class EntityCatalogSource:
             )
 
         return targets
+
+
+async def _async_is_exposed_to_assist(
+    *,
+    entry: Any,
+    checker: Callable[[str], Awaitable[bool | None]] | None,
+) -> bool:
+    """Determine exposure with fallback to Assist exposure API when needed."""
+    if getattr(entry, "exposed_by", None) is not None:
+        return True
+
+    if checker is None:
+        return False
+
+    checked = await checker(entry.entity_id)
+    return checked is True
+
+
+async def _async_build_exposure_checker(
+    hass: Any,
+) -> Callable[[str], Awaitable[bool | None]] | None:
+    """Build a checker for Assist exposure using Home Assistant exposed-entities helpers."""
+    try:
+        from homeassistant.components.homeassistant import exposed_entities as ee
+    except Exception as err:  # pragma: no cover - optional API
+        _LOGGER.debug("Assist exposed-entities API unavailable: %s", err)
+        return None
+
+    async def _check(entity_id: str) -> bool | None:
+        if hasattr(ee, "async_should_expose"):
+            return bool(await ee.async_should_expose(hass, "conversation", entity_id))
+        if hasattr(ee, "async_is_exposed"):
+            return bool(await ee.async_is_exposed(hass, "conversation", entity_id))
+        if hasattr(ee, "should_expose"):
+            return bool(ee.should_expose(hass, "conversation", entity_id))
+        if hasattr(ee, "is_exposed"):
+            return bool(ee.is_exposed(hass, "conversation", entity_id))
+        return None
+
+    return _check
 
 
 class ConversationTargetSource:

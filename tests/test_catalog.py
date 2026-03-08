@@ -96,18 +96,21 @@ class _FakeFloorRegistry:
 
 
 class _FakeHass:
-    def __init__(self, states, entity_entries):
+    def __init__(self, states, entity_entries, exposure_map=None):
         self.states = _FakeStates(states)
         self.data = {}
         self._entity_reg = _FakeEntityRegistry(entity_entries)
         self._area_reg = _FakeAreaRegistry({"area_kitchen": _FakeArea("Kitchen", "f1")})
         self._device_reg = _FakeDeviceRegistry({"dev1": _FakeDevice("Kitchen Device", "area_kitchen")})
         self._floor_reg = _FakeFloorRegistry({"f1": _FakeFloor("First Floor")})
+        self._exposure_map = exposure_map or {}
 
 
 def _install_fake_registry_modules(monkeypatch, hass: _FakeHass) -> None:
     homeassistant_mod = types.ModuleType("homeassistant")
     helpers_mod = types.ModuleType("homeassistant.helpers")
+    components_mod = types.ModuleType("homeassistant.components")
+    ha_comp_mod = types.ModuleType("homeassistant.components.homeassistant")
 
     ar_mod = types.ModuleType("homeassistant.helpers.area_registry")
     ar_mod.async_get = lambda _hass: hass._area_reg
@@ -121,12 +124,26 @@ def _install_fake_registry_modules(monkeypatch, hass: _FakeHass) -> None:
     fr_mod = types.ModuleType("homeassistant.helpers.floor_registry")
     fr_mod.async_get = lambda _hass: hass._floor_reg
 
+    ee_mod = types.ModuleType("homeassistant.components.homeassistant.exposed_entities")
+
+    async def _async_should_expose(_hass, _assistant, entity_id):
+        return hass._exposure_map.get(entity_id)
+
+    ee_mod.async_should_expose = _async_should_expose
+
     monkeypatch.setitem(sys.modules, "homeassistant", homeassistant_mod)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.components", components_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.components.homeassistant", ha_comp_mod)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.area_registry", ar_mod)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", dr_mod)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", er_mod)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.floor_registry", fr_mod)
+    monkeypatch.setitem(
+        sys.modules,
+        "homeassistant.components.homeassistant.exposed_entities",
+        ee_mod,
+    )
 
 
 def _config() -> RouterConfig:
@@ -188,6 +205,21 @@ def test_non_exposed_entity_excluded(monkeypatch: pytest.MonkeyPatch) -> None:
             _FakeEntityEntry(entity_id="light.kitchen", exposed_by="assist"),
             _FakeEntityEntry(entity_id="light.secret", exposed_by=None),
         ],
+    )
+    _install_fake_registry_modules(monkeypatch, hass)
+
+    manager = CatalogManager(hass, _config())
+    catalog = asyncio.run(manager.async_rebuild())
+    assert [target.entity_id for target in catalog.entity_targets] == ["light.kitchen"]
+
+
+def test_exposed_by_empty_but_assist_api_exposed_is_included(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = _FakeHass(
+        [_FakeState("light.kitchen", "Kitchen Light")],
+        [_FakeEntityEntry(entity_id="light.kitchen", exposed_by=None)],
+        exposure_map={"light.kitchen": True},
     )
     _install_fake_registry_modules(monkeypatch, hass)
 

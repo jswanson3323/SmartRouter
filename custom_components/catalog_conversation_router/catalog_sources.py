@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
-from collections.abc import Awaitable, Callable
 from collections.abc import Iterable
 from typing import Any
 
@@ -17,6 +17,7 @@ def _entity_capabilities_from_domain(domain: str) -> list[str]:
     mapping = {
         "light": ["turn_on", "turn_off", "set"],
         "switch": ["turn_on", "turn_off"],
+        "fan": ["turn_on", "turn_off", "set"],
         "climate": ["set", "query", "turn_on", "turn_off"],
         "cover": ["open", "close", "set"],
         "lock": ["lock", "unlock"],
@@ -29,11 +30,27 @@ def _entity_capabilities_from_domain(domain: str) -> list[str]:
     return mapping.get(domain, ["activate", "query"])
 
 
+def _coerce_bool(value: Any) -> bool | None:
+    """Best-effort coercion for mixed HA API return types."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "on", "yes", "1"}:
+            return True
+        if lowered in {"false", "off", "no", "0"}:
+            return False
+    return bool(value)
+
+
 class EntityCatalogSource:
     """Build entity target catalog from Home Assistant state + registries."""
 
     async def async_collect(self, hass: Any) -> list[EntityTarget]:
         """Collect entity targets best-effort."""
+        states_by_entity_id = {state.entity_id: state for state in hass.states.async_all()}
         area_lookup: dict[str, str] = {}
         device_lookup: dict[str, str] = {}
         floor_lookup: dict[str, str] = {}
@@ -42,9 +59,13 @@ class EntityCatalogSource:
 
         try:
             from homeassistant.helpers import entity_registry as er
+
             entity_reg = er.async_get(hass)
         except Exception as err:  # pragma: no cover - depends on HA internals
-            _LOGGER.warning("Entity registry unavailable; skipping entity catalog build: %s", err)
+            _LOGGER.warning(
+                "Entity registry unavailable; skipping entity catalog build: %s",
+                err,
+            )
             return []
 
         area_reg = None
@@ -67,40 +88,42 @@ class EntityCatalogSource:
         except Exception as err:  # pragma: no cover - optional enrichment
             _LOGGER.debug("Floor registry enrichment unavailable: %s", err)
 
-        exposure_checker = await _async_build_exposure_checker(hass)
-        _LOGGER.debug("Assist exposure checker built=%s", exposure_checker is not None)
-
         for entry in entity_reg.entities.values():
             if entry.disabled_by is not None or entry.hidden_by is not None:
                 _LOGGER.debug(
-                    "Entity exposure check: entity_id=%s exposed_by=%s included=%s reason=%s",
+                    "Entity skipped: entity_id=%s reason=hidden_or_disabled",
                     entry.entity_id,
-                    getattr(entry, "exposed_by", None),
-                    False,
-                    "hidden_or_disabled",
                 )
                 continue
 
+            state = states_by_entity_id.get(entry.entity_id)
             is_exposed = await _async_is_exposed_to_assist(
+                hass=hass,
                 entry=entry,
-                checker=exposure_checker,
+                state=state,
             )
             _LOGGER.debug(
-                "Entity exposure check: entity_id=%s exposed_by=%s included=%s",
+                "Entity exposure check: entity_id=%s exposed_by=%s state_assist_exposed=%s included=%s",
                 entry.entity_id,
                 getattr(entry, "exposed_by", None),
+                None if state is None else state.attributes.get("assist_exposed"),
                 is_exposed,
             )
             if not is_exposed:
                 continue
 
             included_entity_ids.add(entry.entity_id)
-            aliases_lookup[entry.entity_id] = list(entry.aliases or [])
+            aliases_lookup[entry.entity_id] = list(getattr(entry, "aliases", []) or [])
 
             try:
                 if area_reg is not None and entry.area_id:
-                    if area := area_reg.async_get_area(entry.area_id):
+                    area = area_reg.async_get_area(entry.area_id)
+                    if area:
                         area_lookup[entry.entity_id] = area.name
+                        if floor_reg is not None and getattr(area, "floor_id", None):
+                            floor = floor_reg.async_get_floor(area.floor_id)
+                            if floor:
+                                floor_lookup[entry.entity_id] = floor.name
             except Exception as err:  # pragma: no cover - optional enrichment
                 _LOGGER.debug("Area lookup failed for %s: %s", entry.entity_id, err)
 
@@ -110,19 +133,22 @@ class EntityCatalogSource:
                     if device:
                         device_lookup[entry.entity_id] = device.name_by_user or device.name
                         if area_reg is not None and device.area_id:
-                            if area := area_reg.async_get_area(device.area_id):
+                            area = area_reg.async_get_area(device.area_id)
+                            if area:
                                 area_lookup.setdefault(entry.entity_id, area.name)
-                                if floor_reg is not None and area.floor_id:
-                                    if floor := floor_reg.async_get_floor(area.floor_id):
+                                if floor_reg is not None and getattr(area, "floor_id", None):
+                                    floor = floor_reg.async_get_floor(area.floor_id)
+                                    if floor:
                                         floor_lookup[entry.entity_id] = floor.name
             except Exception as err:  # pragma: no cover - optional enrichment
                 _LOGGER.debug("Device/floor enrichment failed for %s: %s", entry.entity_id, err)
 
         targets: list[EntityTarget] = []
-        for state in hass.states.async_all():
-            entity_id = state.entity_id
-            if entity_id not in included_entity_ids:
+        for entity_id in included_entity_ids:
+            state = states_by_entity_id.get(entity_id)
+            if state is None:
                 continue
+
             domain, _, _ = entity_id.partition(".")
             name = state.name or entity_id
             aliases = aliases_lookup.get(entity_id, [])
@@ -135,6 +161,8 @@ class EntityCatalogSource:
                 tokens.extend(tokenize(alias))
             if area_name:
                 tokens.extend(tokenize(area_name))
+            if device_name:
+                tokens.extend(tokenize(device_name))
             tokens = sorted(set(tokens))
 
             targets.append(
@@ -154,48 +182,101 @@ class EntityCatalogSource:
                 )
             )
 
-        _LOGGER.debug("Entity catalog included entity_count=%s", len(targets))
+        _LOGGER.debug(
+            "Entity catalog included entity_count=%s included_entity_ids=%s",
+            len(targets),
+            sorted(included_entity_ids),
+        )
         return targets
 
 
 async def _async_is_exposed_to_assist(
     *,
+    hass: Any,
     entry: Any,
-    checker: Callable[[str], Awaitable[bool | None]] | None,
+    state: Any | None,
 ) -> bool:
-    """Determine exposure with fallback to Assist exposure API when needed."""
+    """Determine whether an entity is exposed to Assist.
+
+    Preference order:
+    1. Home Assistant exposed_entities helper API
+    2. entity_registry.exposed_by
+    3. state attribute fallback for older/custom setups
+    """
+    helper_result = await _async_check_assist_exposure_via_helper(
+        hass=hass,
+        entity_id=entry.entity_id,
+    )
+    if helper_result is not None:
+        return helper_result
+
     if getattr(entry, "exposed_by", None) is not None:
         return True
 
-    if checker is None:
-        return False
+    if state is not None:
+        state_attr_result = _coerce_bool(state.attributes.get("assist_exposed"))
+        if state_attr_result is not None:
+            return state_attr_result
 
-    checked = await checker(entry.entity_id)
-    return checked is True
+        for key in (
+            "conversation_exposed",
+            "exposed_to_assist",
+            "voice_assistant_exposed",
+        ):
+            fallback = _coerce_bool(state.attributes.get(key))
+            if fallback is not None:
+                return fallback
+
+    return False
 
 
-async def _async_build_exposure_checker(
+async def _async_check_assist_exposure_via_helper(
+    *,
     hass: Any,
-) -> Callable[[str], Awaitable[bool | None]] | None:
-    """Build a checker for Assist exposure using Home Assistant exposed-entities helpers."""
+    entity_id: str,
+) -> bool | None:
+    """Best-effort check using Home Assistant exposed_entities helpers."""
     try:
         from homeassistant.components.homeassistant import exposed_entities as ee
     except Exception as err:  # pragma: no cover - optional API
-        _LOGGER.debug("Assist exposed-entities API unavailable: %s", err)
+        _LOGGER.debug("Assist exposed-entities module unavailable: %s", err)
         return None
 
-    async def _check(entity_id: str) -> bool | None:
-        if hasattr(ee, "async_should_expose"):
-            return bool(await ee.async_should_expose(hass, "conversation", entity_id))
-        if hasattr(ee, "async_is_exposed"):
-            return bool(await ee.async_is_exposed(hass, "conversation", entity_id))
-        if hasattr(ee, "should_expose"):
-            return bool(ee.should_expose(hass, "conversation", entity_id))
-        if hasattr(ee, "is_exposed"):
-            return bool(ee.is_exposed(hass, "conversation", entity_id))
-        return None
+    candidate_calls: list[tuple[str, tuple[Any, ...]]] = [
+        ("async_should_expose", (hass, "conversation", entity_id)),
+        ("async_is_exposed", (hass, "conversation", entity_id)),
+        ("should_expose", (hass, "conversation", entity_id)),
+        ("is_exposed", (hass, "conversation", entity_id)),
+        # Older/internal manager style fallbacks
+        ("async_should_expose", ("conversation", entity_id)),
+        ("async_is_exposed", ("conversation", entity_id)),
+        ("should_expose", ("conversation", entity_id)),
+        ("is_exposed", ("conversation", entity_id)),
+    ]
 
-    return _check
+    for attr_name, args in candidate_calls:
+        func = getattr(ee, attr_name, None)
+        if func is None:
+            continue
+
+        try:
+            result = func(*args)
+            if inspect.isawaitable(result):
+                result = await result
+            coerced = _coerce_bool(result)
+            if coerced is not None:
+                return coerced
+        except TypeError:
+            continue
+        except Exception as err:  # pragma: no cover - version specific
+            _LOGGER.debug(
+                "Assist exposure helper failed for %s via %s: %s",
+                entity_id,
+                attr_name,
+                err,
+            )
+
+    return None
 
 
 class ConversationTargetSource:
@@ -266,7 +347,10 @@ class ConversationTargetSource:
 class ManualConversationTargetSource:
     """Merge user-provided manual conversation targets."""
 
-    async def async_collect(self, manual_targets: Iterable[dict[str, Any]]) -> list[ConversationTarget]:
+    async def async_collect(
+        self,
+        manual_targets: Iterable[dict[str, Any]],
+    ) -> list[ConversationTarget]:
         """Build targets from manual settings."""
         output: list[ConversationTarget] = []
         for idx, target in enumerate(manual_targets):
@@ -275,8 +359,14 @@ class ManualConversationTargetSource:
             if not display_name or not canonical_phrase:
                 continue
 
-            sample_phrases = [str(v).strip() for v in target.get("sample_phrases", []) if str(v).strip()]
-            aliases = [str(v).strip() for v in target.get("aliases", []) if str(v).strip()]
+            sample_phrases = [
+                str(v).strip()
+                for v in target.get("sample_phrases", [])
+                if str(v).strip()
+            ]
+            aliases = [
+                str(v).strip() for v in target.get("aliases", []) if str(v).strip()
+            ]
             enabled = bool(target.get("enabled", True))
             target_type = str(target.get("target_type", "manual"))
 

@@ -167,3 +167,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload when options change."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+async def async_dump_catalog(call):
+    catalog = hass.data["catalog_conversation_router"]["catalog"]
+
+    _LOGGER.warning("===== ENTITY TARGETS =====")
+    for e in catalog.entity_targets:
+        _LOGGER.warning("%s | %s", e.entity_id, e.name)
+
+    _LOGGER.warning("===== CONVERSATION TARGETS =====")
+    for c in catalog.conversation_targets:
+        _LOGGER.warning("%s | %s | %s", c.target_id, c.display_name, c.sample_phrases)
+
+hass.services.async_register(
+    "catalog_conversation_router",
+    "dump_catalog",
+    async_dump_catalog,
+)

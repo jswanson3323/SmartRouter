@@ -36,6 +36,29 @@ from .const import (
     DOMAIN,
 )
 
+BUILTIN_LOCAL_AGENT_ID = "homeassistant"
+NO_AGENT_PLACEHOLDER = "__no_agent_available__"
+
+CONVERSATION_AGENT_DOMAINS = {
+    "assist",
+    "conversation",
+    "openai_conversation",
+    "google_generative_ai_conversation",
+    "chatgpt",
+    "ollama",
+    "llama_conversation",
+    "assist_satellite",
+}
+
+LLM_AGENT_DOMAINS = {
+    "openai_conversation",
+    "google_generative_ai_conversation",
+    "ollama",
+    "anthropic",
+    "llama_conversation",
+    "chatgpt",
+}
+
 
 def build_router_config(data: dict[str, Any]) -> dict[str, Any]:
     """Normalize user data with defaults and type coercion."""
@@ -82,6 +105,66 @@ def parse_manual_targets(raw_json: str) -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)]
 
 
+async def async_get_local_agent_options(hass) -> list[selector.SelectOptionDict]:
+    """Get local-capable conversation agent options."""
+    options: list[selector.SelectOptionDict] = [
+        selector.SelectOptionDict(label="Home Assistant", value=BUILTIN_LOCAL_AGENT_ID)
+    ]
+    seen: set[str] = {BUILTIN_LOCAL_AGENT_ID}
+
+    for entry in hass.config_entries.async_entries():
+        state_name = getattr(getattr(entry, "state", None), "name", "")
+        if state_name and state_name != "LOADED":
+            continue
+        domain = entry.domain
+        if domain not in CONVERSATION_AGENT_DOMAINS and "conversation" not in domain:
+            continue
+
+        agent_id = entry.entry_id
+        if agent_id in seen:
+            continue
+        seen.add(agent_id)
+
+        title = entry.title or domain.replace("_", " ").title()
+        options.append(selector.SelectOptionDict(label=title, value=agent_id))
+
+    options.sort(key=lambda item: item["label"].lower())
+    return options
+
+
+async def async_get_llm_agent_options(hass) -> list[selector.SelectOptionDict]:
+    """Get likely LLM conversation agent options."""
+    options: list[selector.SelectOptionDict] = []
+    seen: set[str] = set()
+
+    for entry in hass.config_entries.async_entries():
+        state_name = getattr(getattr(entry, "state", None), "name", "")
+        if state_name and state_name != "LOADED":
+            continue
+
+        domain = entry.domain
+        if domain not in LLM_AGENT_DOMAINS and "conversation" not in domain:
+            continue
+
+        agent_id = entry.entry_id
+        if agent_id in seen:
+            continue
+        seen.add(agent_id)
+
+        title = entry.title or domain.replace("_", " ").title()
+        options.append(selector.SelectOptionDict(label=title, value=agent_id))
+
+    options.sort(key=lambda item: item["label"].lower())
+    if not options:
+        options.append(
+            selector.SelectOptionDict(
+                label="No LLM conversation agents found",
+                value=NO_AGENT_PLACEHOLDER,
+            )
+        )
+    return options
+
+
 class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle config flow."""
 
@@ -89,13 +172,22 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
-        agent_selector = _build_agent_selector()
+
+        local_options = await async_get_local_agent_options(self.hass)
+        llm_options = await async_get_llm_agent_options(self.hass)
+        local_selector = _build_select_selector(local_options)
+        llm_selector = _build_select_selector(llm_options)
+
+        if llm_options and llm_options[0]["value"] == NO_AGENT_PLACEHOLDER:
+            errors["base"] = "no_llm_agents_found"
 
         if user_input is not None:
             try:
                 config = build_router_config(user_input)
                 if not config[CONF_LOCAL_AGENT_ID] or not config[CONF_LLM_AGENT_ID]:
                     errors["base"] = "agent_required"
+                elif config[CONF_LLM_AGENT_ID] == NO_AGENT_PLACEHOLDER:
+                    errors["base"] = "no_llm_agents_found"
                 elif config[CONF_LOCAL_AGENT_ID] == config[CONF_LLM_AGENT_ID]:
                     errors["base"] = "agents_must_differ"
                 else:
@@ -110,8 +202,14 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_LOCAL_AGENT_ID): agent_selector,
-                    vol.Required(CONF_LLM_AGENT_ID): agent_selector,
+                    vol.Required(
+                        CONF_LOCAL_AGENT_ID,
+                        default=BUILTIN_LOCAL_AGENT_ID,
+                    ): local_selector,
+                    vol.Required(
+                        CONF_LLM_AGENT_ID,
+                        default=llm_options[0]["value"],
+                    ): llm_selector,
                     vol.Optional(CONF_LANGUAGE, default="en"): str,
                     vol.Optional(CONF_FUZZY_ENABLED, default=DEFAULT_FUZZY_ENABLED): bool,
                     vol.Optional(
@@ -161,11 +259,18 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
-        agent_selector = _build_agent_selector()
         current_manual = self._entry.options.get(
             CONF_MANUAL_TARGETS,
             self._entry.data.get(CONF_MANUAL_TARGETS, []),
         )
+
+        local_options = await async_get_local_agent_options(self.hass)
+        llm_options = await async_get_llm_agent_options(self.hass)
+        local_selector = _build_select_selector(local_options)
+        llm_selector = _build_select_selector(llm_options)
+
+        if llm_options and llm_options[0]["value"] == NO_AGENT_PLACEHOLDER:
+            errors["base"] = "no_llm_agents_found"
 
         if user_input is not None:
             try:
@@ -182,8 +287,11 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                 if (
                     not normalized[CONF_LOCAL_AGENT_ID]
                     or not normalized[CONF_LLM_AGENT_ID]
-                    or normalized[CONF_LOCAL_AGENT_ID] == normalized[CONF_LLM_AGENT_ID]
                 ):
+                    errors["base"] = "agent_required"
+                elif normalized[CONF_LLM_AGENT_ID] == NO_AGENT_PLACEHOLDER:
+                    errors["base"] = "no_llm_agents_found"
+                elif normalized[CONF_LOCAL_AGENT_ID] == normalized[CONF_LLM_AGENT_ID]:
                     errors["base"] = "agents_must_differ"
                 else:
                     return self.async_create_entry(title="", data=normalized)
@@ -194,7 +302,9 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             data_schema=self._build_options_schema(
                 current_manual=current_manual,
-                agent_selector=agent_selector,
+                local_selector=local_selector,
+                llm_selector=llm_selector,
+                llm_options=llm_options,
             ),
             errors=errors,
         )
@@ -203,7 +313,9 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
         self,
         *,
         current_manual: list[dict[str, Any]],
-        agent_selector,
+        local_selector,
+        llm_selector,
+        llm_options: list[selector.SelectOptionDict],
     ) -> vol.Schema:
         """Build options form schema."""
         return vol.Schema(
@@ -212,16 +324,16 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                     CONF_LOCAL_AGENT_ID,
                     default=self._entry.options.get(
                         CONF_LOCAL_AGENT_ID,
-                        self._entry.data.get(CONF_LOCAL_AGENT_ID, ""),
+                        self._entry.data.get(CONF_LOCAL_AGENT_ID, BUILTIN_LOCAL_AGENT_ID),
                     ),
-                ): agent_selector,
+                ): local_selector,
                 vol.Required(
                     CONF_LLM_AGENT_ID,
                     default=self._entry.options.get(
                         CONF_LLM_AGENT_ID,
-                        self._entry.data.get(CONF_LLM_AGENT_ID, ""),
+                        self._entry.data.get(CONF_LLM_AGENT_ID, llm_options[0]["value"]),
                     ),
-                ): agent_selector,
+                ): llm_selector,
                 vol.Optional(
                     CONF_LANGUAGE,
                     default=self._entry.options.get(
@@ -315,17 +427,15 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
         )
 
 
-def _build_agent_selector():
-    """Use native conversation-agent lookup selector from Home Assistant."""
-    try:
-        return selector.selector({"conversation_agent": {}})
-    except Exception:
-        # Fallback for older cores lacking conversation_agent selector.
-        return selector.SelectSelector(
-            selector.SelectSelectorConfig(
-                options=[],
-                mode=selector.SelectSelectorMode.DROPDOWN,
-                custom_value=True,
-                sort=False,
-            )
+def _build_select_selector(
+    options: list[selector.SelectOptionDict],
+) -> selector.SelectSelector:
+    """Build a dropdown selector with fixed options."""
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=options,
+            mode=selector.SelectSelectorMode.DROPDOWN,
+            custom_value=False,
+            sort=False,
         )
+    )

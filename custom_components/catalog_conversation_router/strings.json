@@ -23,7 +23,8 @@
     "error": {
       "agent_required": "Both local and LLM agent IDs are required.",
       "agents_must_differ": "Local and LLM agents must be different.",
-      "invalid_config": "Invalid configuration."
+      "invalid_config": "Invalid configuration.",
+      "no_llm_agents_found": "No LLM conversation agents were found. Install or configure one first."
     }
   },
   "options": {
@@ -47,7 +48,8 @@
     },
     "error": {
       "invalid_manual_targets": "Manual targets must be a JSON list of objects.",
-      "agents_must_differ": "Local and LLM agents must be different."
+      "agents_must_differ": "Local and LLM agents must be different.",
+      "no_llm_agents_found": "No LLM conversation agents were found. Install or configure one first."
     }
   }
 }

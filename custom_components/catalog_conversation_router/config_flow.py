@@ -89,7 +89,7 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
-        agent_selector = await _async_build_agent_selector(self.hass)
+        agent_selector = _build_agent_selector()
 
         if user_input is not None:
             try:
@@ -161,7 +161,7 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
-        agent_selector = await _async_build_agent_selector(self.hass)
+        agent_selector = _build_agent_selector()
         current_manual = self._entry.options.get(
             CONF_MANUAL_TARGETS,
             self._entry.data.get(CONF_MANUAL_TARGETS, []),
@@ -315,38 +315,17 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
         )
 
 
-async def _async_build_agent_selector(hass):
-    """Build a dropdown selector of conversation agents (value is agent_id/ULID)."""
-    options: list[selector.SelectOptionDict] = []
-    seen: set[str] = set()
-
+def _build_agent_selector():
+    """Use native conversation-agent lookup selector from Home Assistant."""
     try:
-        from homeassistant.components import conversation
-
-        infos: list[Any] = []
-        if hasattr(conversation, "async_get_conversation_agent_info"):
-            infos = await conversation.async_get_conversation_agent_info(hass)
-        elif hasattr(conversation, "async_get_agent_info"):
-            infos = await conversation.async_get_agent_info(hass)
-
-        for info in infos or []:
-            agent_id = getattr(info, "id", None) or getattr(info, "agent_id", None)
-            if not agent_id or agent_id in seen:
-                continue
-            seen.add(agent_id)
-            name = getattr(info, "name", None) or str(agent_id)
-            options.append(selector.SelectOptionDict(value=str(agent_id), label=str(name)))
+        return selector.selector({"conversation_agent": {}})
     except Exception:
-        # If lookup is unavailable, keep selector open for manual entry.
-        options = []
-
-    options.sort(key=lambda item: item["label"].lower())
-
-    return selector.SelectSelector(
-        selector.SelectSelectorConfig(
-            options=options,
-            mode=selector.SelectSelectorMode.DROPDOWN,
-            custom_value=True,
-            sort=False,
+        # Fallback for older cores lacking conversation_agent selector.
+        return selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[],
+                mode=selector.SelectSelectorMode.DROPDOWN,
+                custom_value=True,
+                sort=False,
+            )
         )
-    )

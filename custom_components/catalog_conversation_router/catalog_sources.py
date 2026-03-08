@@ -5,7 +5,10 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .models import ConversationTarget, EntityTarget
 from .phonetics import normalize_text, phonetic_tokens, tokenize
@@ -43,6 +46,68 @@ def _coerce_bool(value: Any) -> bool | None:
         if lowered in {"false", "off", "no", "0"}:
             return False
     return bool(value)
+
+
+def _safe_list(value: Any) -> list[Any]:
+    """Normalize a possibly-scalar/list YAML value into a list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _extract_commands(command_value: Any) -> list[str]:
+    """Extract command strings from scalar/list command fields."""
+    commands: list[str] = []
+    for item in _safe_list(command_value):
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                commands.append(text)
+    return commands
+
+
+def _tokenize_all(values: Iterable[str]) -> list[str]:
+    tokens: list[str] = []
+    for value in values:
+        tokens.extend(tokenize(value))
+    return sorted(set(tokens))
+
+
+class _LenientLoader(yaml.SafeLoader):
+    """YAML loader that tolerates Home Assistant custom tags like !input."""
+
+
+def _construct_unknown_tag(
+    loader: _LenientLoader,
+    node: yaml.Node,
+) -> Any:
+    """Handle unknown YAML tags by returning the underlying Python value."""
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    return None
+
+
+_LenientLoader.add_constructor(None, _construct_unknown_tag)
+
+
+def _read_yaml_file(path: Path) -> Any:
+    """Read YAML file best-effort."""
+    try:
+        if not path.exists():
+            return None
+        text = path.read_text(encoding="utf-8")
+        if not text.strip():
+            return None
+        return yaml.load(text, Loader=_LenientLoader)
+    except Exception as err:  # pragma: no cover - filesystem/runtime specific
+        _LOGGER.warning("Failed reading YAML file %s: %s", path, err)
+        return None
 
 
 class EntityCatalogSource:
@@ -182,9 +247,12 @@ class EntityCatalogSource:
                 )
             )
 
-        _LOGGER.debug(
-            "Entity catalog included entity_count=%s included_entity_ids=%s",
+        _LOGGER.warning(
+            "Entity catalog build complete: entity_count=%s",
             len(targets),
+        )
+        _LOGGER.debug(
+            "Entity catalog included entity_ids=%s",
             sorted(included_entity_ids),
         )
         return targets
@@ -247,7 +315,6 @@ async def _async_check_assist_exposure_via_helper(
         ("async_is_exposed", (hass, "conversation", entity_id)),
         ("should_expose", (hass, "conversation", entity_id)),
         ("is_exposed", (hass, "conversation", entity_id)),
-        # Older/internal manager style fallbacks
         ("async_should_expose", ("conversation", entity_id)),
         ("async_is_exposed", ("conversation", entity_id)),
         ("should_expose", ("conversation", entity_id)),
@@ -285,95 +352,339 @@ class ConversationTargetSource:
     async def async_collect(self, hass: Any) -> list[ConversationTarget]:
         """Collect conversation target candidates from optional sources."""
         targets: list[ConversationTarget] = []
-        targets.extend(await self._from_intent_script(hass))
-        targets.extend(await self._from_sentence_automations(hass))
-        return targets
+        targets.extend(await self._from_intent_script_runtime(hass))
+        targets.extend(await self._from_intent_script_yaml(hass))
+        targets.extend(await self._from_automation_runtime(hass))
+        targets.extend(await self._from_automation_yaml(hass))
 
-    async def _from_intent_script(self, hass: Any) -> list[ConversationTarget]:
-        data: list[ConversationTarget] = []
-        intent_domain = hass.data.get("intent_script")
-        _LOGGER.debug("Intent script discovery: intent_script_domain_exists=%s", bool(intent_domain))
-        if not intent_domain:
-            return data
-
-        scripts = intent_domain.get("intent_scripts") or {}
-        _LOGGER.debug("Intent script discovery: intent_script_count=%s", len(scripts))
-        for intent_name, script in scripts.items():
-            sample = intent_name.replace("_", " ").lower()
-            canonical = f"{sample}"
-            data.append(
-                ConversationTarget(
-                    target_id=f"intent_script:{intent_name}",
-                    type="intent_script",
-                    display_name=intent_name,
-                    normalized_name=normalize_text(intent_name),
-                    sample_phrases=[sample],
-                    canonical_phrase=canonical,
-                    source="intent_script",
-                    slots=list((script or {}).get("slot_schema", {}).keys()),
-                    tokens=tokenize(intent_name),
-                    phonetic_tokens=phonetic_tokens(tokenize(intent_name)),
-                )
+        deduped: dict[tuple[str, str, str], ConversationTarget] = {}
+        for target in targets:
+            key = (
+                target.type,
+                normalize_text(target.display_name),
+                normalize_text(target.canonical_phrase),
             )
-        _LOGGER.debug("Intent script discovery: conversation_targets_built=%s", len(data))
-        return data
-
-    async def _from_sentence_automations(self, hass: Any) -> list[ConversationTarget]:
-        data: list[ConversationTarget] = []
-        automation_states = list(hass.states.async_all("automation"))
-        _LOGGER.debug("Automation sentence discovery: automation_state_count=%s", len(automation_states))
-
-        trigger_attr_present = 0
-        sentence_trigger_count = 0
-
-        for state in automation_states:
-            has_triggers_attr = "triggers" in state.attributes
-            if has_triggers_attr:
-                trigger_attr_present += 1
-
-            triggers = state.attributes.get("triggers")
-            if not isinstance(triggers, list):
-                # In some HA versions trigger metadata is not exposed on runtime state attributes.
-                # Keep this path conservative and skip without inventing targets.
-                _LOGGER.debug(
-                    "Automation sentence discovery: entity_id=%s has_triggers_attr=%s usable=%s",
-                    state.entity_id,
-                    has_triggers_attr,
-                    False,
-                )
+            existing = deduped.get(key)
+            if existing is None:
+                deduped[key] = target
                 continue
 
-            for idx, trigger in enumerate(triggers):
-                if trigger.get("trigger") not in {"conversation", "sentence"}:
-                    continue
-                sentence = trigger.get("command") or trigger.get("sentence")
-                if not sentence:
-                    continue
-                sentence_trigger_count += 1
-                display_name = state.name or state.entity_id
-                tokens = tokenize(display_name + " " + sentence)
-                data.append(
-                    ConversationTarget(
-                        target_id=f"automation:{state.entity_id}:{idx}",
-                        type="automation_sentence",
-                        display_name=display_name,
-                        normalized_name=normalize_text(display_name),
-                        sample_phrases=[sentence],
-                        canonical_phrase=sentence,
-                        source="automation",
-                        slots=[],
-                        tokens=tokens,
-                        phonetic_tokens=phonetic_tokens(tokens),
-                    )
-                )
-        _LOGGER.debug(
-            "Automation sentence discovery: trigger_attr_present_count=%s sentence_trigger_count=%s "
-            "conversation_targets_built=%s",
-            trigger_attr_present,
-            sentence_trigger_count,
-            len(data),
+            merged_phrases = sorted(
+                {
+                    *existing.sample_phrases,
+                    *target.sample_phrases,
+                }
+            )
+            merged_tokens = sorted({*existing.tokens, *target.tokens})
+            merged_phonetics = sorted({*existing.phonetic_tokens, *target.phonetic_tokens})
+            existing.sample_phrases = merged_phrases
+            existing.tokens = merged_tokens
+            existing.phonetic_tokens = merged_phonetics
+
+        final_targets = list(deduped.values())
+        _LOGGER.warning(
+            "Conversation target catalog build complete: target_count=%s raw_count=%s",
+            len(final_targets),
+            len(targets),
         )
-        return data
+        return final_targets
+
+    async def _from_intent_script_runtime(self, hass: Any) -> list[ConversationTarget]:
+        """Best-effort runtime discovery for intent_script."""
+        targets: list[ConversationTarget] = []
+        intent_domain = hass.data.get("intent_script")
+
+        _LOGGER.warning(
+            "Intent script runtime discovery: domain_present=%s domain_type=%s",
+            intent_domain is not None,
+            type(intent_domain).__name__ if intent_domain is not None else "None",
+        )
+        if intent_domain is None:
+            return targets
+
+        scripts: dict[str, Any] = {}
+
+        if isinstance(intent_domain, dict):
+            for key in ("intent_scripts", "intents", "scripts"):
+                candidate = intent_domain.get(key)
+                if isinstance(candidate, dict):
+                    scripts = candidate
+                    _LOGGER.warning(
+                        "Intent script runtime discovery: using dict key=%s count=%s",
+                        key,
+                        len(candidate),
+                    )
+                    break
+            if not scripts:
+                # Some versions may already be keyed by intent name.
+                dict_like_values = any(isinstance(v, (dict, str)) for v in intent_domain.values())
+                if dict_like_values:
+                    scripts = intent_domain
+                    _LOGGER.warning(
+                        "Intent script runtime discovery: using top-level mapping count=%s",
+                        len(scripts),
+                    )
+        else:
+            _LOGGER.warning(
+                "Intent script runtime discovery: unsupported runtime type=%s",
+                type(intent_domain).__name__,
+            )
+
+        for intent_name, script in scripts.items():
+            built = self._build_intent_script_target(intent_name, script, source="intent_script_runtime")
+            if built is not None:
+                targets.append(built)
+
+        _LOGGER.warning(
+            "Intent script runtime discovery complete: built_count=%s",
+            len(targets),
+        )
+        return targets
+
+    async def _from_intent_script_yaml(self, hass: Any) -> list[ConversationTarget]:
+        """File-based discovery for intent_script.yaml."""
+        targets: list[ConversationTarget] = []
+        config_path = Path(hass.config.path("intent_script.yaml"))
+        data = _read_yaml_file(config_path)
+
+        _LOGGER.warning(
+            "Intent script YAML discovery: path=%s exists=%s loaded=%s",
+            config_path,
+            config_path.exists(),
+            data is not None,
+        )
+        if not isinstance(data, dict):
+            return targets
+
+        for intent_name, script in data.items():
+            built = self._build_intent_script_target(intent_name, script, source="intent_script_yaml")
+            if built is not None:
+                targets.append(built)
+
+        _LOGGER.warning(
+            "Intent script YAML discovery complete: built_count=%s",
+            len(targets),
+        )
+        return targets
+
+    def _build_intent_script_target(
+        self,
+        intent_name: str,
+        script: Any,
+        *,
+        source: str,
+    ) -> ConversationTarget | None:
+        """Create a conversation target from an intent_script definition."""
+        if not isinstance(intent_name, str) or not intent_name.strip():
+            return None
+
+        script_dict = script if isinstance(script, dict) else {}
+        friendly_name = str(script_dict.get("name") or intent_name).strip()
+        sample_phrases = [
+            text
+            for text in {
+                intent_name.replace("_", " ").strip(),
+                friendly_name.strip(),
+            }
+            if text
+        ]
+        slots = list((script_dict.get("slot_schema") or {}).keys()) if isinstance(script_dict, dict) else []
+        token_values = _tokenize_all(sample_phrases + [friendly_name])
+
+        return ConversationTarget(
+            target_id=f"{source}:{intent_name}",
+            type="intent_script",
+            display_name=friendly_name,
+            normalized_name=normalize_text(friendly_name),
+            sample_phrases=sample_phrases,
+            canonical_phrase=intent_name.replace("_", " ").strip().lower(),
+            source=source,
+            slots=slots,
+            tokens=token_values,
+            phonetic_tokens=phonetic_tokens(token_values),
+        )
+
+    async def _from_automation_runtime(self, hass: Any) -> list[ConversationTarget]:
+        """Very conservative runtime discovery.
+
+        Runtime automation entity states usually do not expose trigger definitions,
+        but we still log what is available so failures are visible.
+        """
+        targets: list[ConversationTarget] = []
+        automation_states = list(hass.states.async_all("automation"))
+        attr_trigger_count = 0
+
+        for state in automation_states:
+            triggers = state.attributes.get("triggers")
+            if isinstance(triggers, list):
+                attr_trigger_count += len(triggers)
+                for idx, trigger in enumerate(triggers):
+                    built = self._build_automation_target_from_trigger(
+                        trigger=trigger,
+                        target_id=f"automation_runtime:{state.entity_id}:{idx}",
+                        display_name=state.name or state.entity_id,
+                        source="automation_runtime",
+                    )
+                    if built is not None:
+                        targets.append(built)
+
+        _LOGGER.warning(
+            "Automation runtime discovery complete: automation_state_count=%s trigger_attr_count=%s built_count=%s",
+            len(automation_states),
+            attr_trigger_count,
+            len(targets),
+        )
+        return targets
+
+    async def _from_automation_yaml(self, hass: Any) -> list[ConversationTarget]:
+        """YAML-based discovery for automations, including blueprint-backed instances."""
+        targets: list[ConversationTarget] = []
+        automations_path = Path(hass.config.path("automations.yaml"))
+        data = _read_yaml_file(automations_path)
+
+        _LOGGER.warning(
+            "Automation YAML discovery: path=%s exists=%s loaded=%s",
+            automations_path,
+            automations_path.exists(),
+            data is not None,
+        )
+        if not isinstance(data, list):
+            return targets
+
+        direct_count = 0
+        blueprint_count = 0
+
+        for idx, automation in enumerate(data):
+            if not isinstance(automation, dict):
+                continue
+
+            display_name = str(
+                automation.get("alias")
+                or automation.get("id")
+                or f"automation_{idx}"
+            ).strip()
+
+            use_blueprint = automation.get("use_blueprint")
+            if isinstance(use_blueprint, dict):
+                blueprint_targets = self._build_targets_from_blueprint_reference(
+                    hass=hass,
+                    use_blueprint=use_blueprint,
+                    display_name=display_name,
+                    automation_index=idx,
+                )
+                blueprint_count += len(blueprint_targets)
+                targets.extend(blueprint_targets)
+                continue
+
+            triggers = automation.get("trigger") or automation.get("triggers") or []
+            for trigger_index, trigger in enumerate(_safe_list(triggers)):
+                built = self._build_automation_target_from_trigger(
+                    trigger=trigger,
+                    target_id=f"automation_yaml:{idx}:{trigger_index}",
+                    display_name=display_name,
+                    source="automation_yaml",
+                )
+                if built is not None:
+                    direct_count += 1
+                    targets.append(built)
+
+        _LOGGER.warning(
+            "Automation YAML discovery complete: automation_count=%s direct_built=%s blueprint_built=%s total_built=%s",
+            len(data),
+            direct_count,
+            blueprint_count,
+            len(targets),
+        )
+        return targets
+
+    def _build_targets_from_blueprint_reference(
+        self,
+        *,
+        hass: Any,
+        use_blueprint: dict[str, Any],
+        display_name: str,
+        automation_index: int,
+    ) -> list[ConversationTarget]:
+        """Build targets from a blueprint file referenced by an automation."""
+        blueprint_path = use_blueprint.get("path")
+        if not isinstance(blueprint_path, str) or not blueprint_path.strip():
+            _LOGGER.warning(
+                "Blueprint automation discovery skipped: automation=%s reason=missing_path",
+                display_name,
+            )
+            return []
+
+        resolved_path = Path(hass.config.path("blueprints", "automation", blueprint_path))
+        blueprint_data = _read_yaml_file(resolved_path)
+
+        _LOGGER.warning(
+            "Blueprint automation discovery: automation=%s path=%s exists=%s loaded=%s",
+            display_name,
+            resolved_path,
+            resolved_path.exists(),
+            blueprint_data is not None,
+        )
+        if not isinstance(blueprint_data, dict):
+            return []
+
+        triggers = blueprint_data.get("trigger") or blueprint_data.get("triggers") or []
+        built_targets: list[ConversationTarget] = []
+        for trigger_index, trigger in enumerate(_safe_list(triggers)):
+            built = self._build_automation_target_from_trigger(
+                trigger=trigger,
+                target_id=f"automation_blueprint:{automation_index}:{trigger_index}",
+                display_name=display_name,
+                source=f"automation_blueprint:{blueprint_path}",
+            )
+            if built is not None:
+                built_targets.append(built)
+
+        _LOGGER.warning(
+            "Blueprint automation discovery complete: automation=%s built_count=%s",
+            display_name,
+            len(built_targets),
+        )
+        return built_targets
+
+    def _build_automation_target_from_trigger(
+        self,
+        *,
+        trigger: Any,
+        target_id: str,
+        display_name: str,
+        source: str,
+    ) -> ConversationTarget | None:
+        """Create a conversation target from a single trigger definition."""
+        if not isinstance(trigger, dict):
+            return None
+
+        platform_value = trigger.get("platform") or trigger.get("trigger")
+        if platform_value not in {"conversation", "sentence"}:
+            return None
+
+        commands = _extract_commands(trigger.get("command") or trigger.get("sentence"))
+        if not commands:
+            return None
+
+        trigger_id = str(trigger.get("id") or target_id).strip()
+        slots = []
+        if isinstance(trigger.get("slots"), dict):
+            slots = list(trigger["slots"].keys())
+
+        token_values = _tokenize_all([display_name, *commands, trigger_id])
+
+        return ConversationTarget(
+            target_id=f"{source}:{trigger_id}",
+            type="automation_sentence",
+            display_name=display_name,
+            normalized_name=normalize_text(display_name),
+            sample_phrases=commands,
+            canonical_phrase=commands[0],
+            source=source,
+            slots=slots,
+            tokens=token_values,
+            phonetic_tokens=phonetic_tokens(token_values),
+        )
 
 
 class ManualConversationTargetSource:
@@ -424,4 +735,9 @@ class ManualConversationTargetSource:
                     enabled=enabled,
                 )
             )
+
+        _LOGGER.warning(
+            "Manual conversation target merge complete: built_count=%s",
+            len(output),
+        )
         return output

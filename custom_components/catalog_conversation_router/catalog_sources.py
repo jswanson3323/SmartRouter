@@ -33,12 +33,11 @@ class EntityCatalogSource:
 
     async def async_collect(self, hass: Any) -> list[EntityTarget]:
         """Collect entity targets best-effort."""
-        states = list(hass.states.async_all())
-
         area_lookup: dict[str, str] = {}
         device_lookup: dict[str, str] = {}
         floor_lookup: dict[str, str] = {}
         aliases_lookup: dict[str, list[str]] = {}
+        included_entity_ids: set[str] = set()
 
         try:
             from homeassistant.helpers import area_registry as ar
@@ -52,6 +51,14 @@ class EntityCatalogSource:
             floor_reg = fr.async_get(hass)
 
             for entry in entity_reg.entities.values():
+                if (
+                    entry.disabled_by is not None
+                    or entry.hidden_by is not None
+                    or entry.exposed_by is None
+                ):
+                    continue
+
+                included_entity_ids.add(entry.entity_id)
                 aliases_lookup[entry.entity_id] = list(entry.aliases or [])
                 if entry.area_id and (area := area_reg.async_get_area(entry.area_id)):
                     area_lookup[entry.entity_id] = area.name
@@ -62,18 +69,24 @@ class EntityCatalogSource:
                         if area.floor_id and (floor := floor_reg.async_get_floor(area.floor_id)):
                             floor_lookup[entry.entity_id] = floor.name
         except Exception as err:  # pragma: no cover - depends on HA internals
-            _LOGGER.debug("Registry enrichment unavailable: %s", err)
+            _LOGGER.warning(
+                "Entity registry unavailable for assist exposure filtering; "
+                "skipping entity catalog build: %s",
+                err,
+            )
+            return []
 
         targets: list[EntityTarget] = []
-        for state in states:
+        for state in hass.states.async_all():
             entity_id = state.entity_id
+            if entity_id not in included_entity_ids:
+                continue
             domain, _, _ = entity_id.partition(".")
             name = state.name or entity_id
             aliases = aliases_lookup.get(entity_id, [])
             area_name = area_lookup.get(entity_id)
             floor = floor_lookup.get(entity_id)
             device_name = device_lookup.get(entity_id)
-            exposed = state.attributes.get("assist_exposed")
 
             tokens = tokenize(name)
             for alias in aliases:
@@ -92,7 +105,7 @@ class EntityCatalogSource:
                     area=area_name,
                     floor=floor,
                     device_name=device_name,
-                    exposed=exposed,
+                    exposed=True,
                     capabilities=_entity_capabilities_from_domain(domain),
                     tokens=tokens,
                     phonetic_tokens=phonetic_tokens(tokens),

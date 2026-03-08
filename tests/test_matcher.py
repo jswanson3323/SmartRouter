@@ -91,3 +91,28 @@ def test_ambiguity_rejection() -> None:
     matcher = FuzzyMatcher(fuzzy_threshold=0.4, ambiguity_gap=0.20)
     result = matcher.match("turn on kitchen", catalog)
     assert result.matched is False
+
+
+def test_same_canonical_phrase_not_counted_as_ambiguity() -> None:
+    catalog = _catalog()
+    catalog.conversation_targets.append(
+        ConversationTarget(
+            target_id="manual:kitchen_light_alias",
+            type="manual",
+            display_name="kitchen main light",
+            normalized_name="kitchen main light",
+            sample_phrases=["kitchen light"],
+            canonical_phrase="turn on kitchen light",
+            source="manual",
+            slots=[],
+            tokens=["kitchen", "light", "main"],
+            phonetic_tokens=["K325", "L230", "M500"],
+            aliases=["kitchen line"],
+        )
+    )
+    matcher = FuzzyMatcher(fuzzy_threshold=0.4, ambiguity_gap=0.20)
+    result = matcher.match("turn on kitchen line", catalog)
+    assert result.best is not None
+    assert result.best.canonical_phrase == "turn on kitchen light"
+    assert result.matched is True
+    assert len({c.canonical_phrase for c in result.top_candidates}) == len(result.top_candidates)

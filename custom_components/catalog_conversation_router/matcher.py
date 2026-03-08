@@ -176,6 +176,7 @@ class FuzzyMatcher:
             )
 
         ranked = sorted(scores, key=lambda item: item.score, reverse=True)
+        ranked = self._dedupe_by_canonical_phrase(ranked)
         top = ranked[:3]
         best = top[0] if top else None
         second = top[1] if len(top) > 1 else None
@@ -270,3 +271,15 @@ class FuzzyMatcher:
         if prefix == "what is":
             return f"what is {name}"
         return f"{prefix} {name}"
+
+    def _dedupe_by_canonical_phrase(self, ranked: list[CandidateScore]) -> list[CandidateScore]:
+        """Deduplicate by canonical phrase, keeping highest-score candidate for each phrase."""
+        deduped: list[CandidateScore] = []
+        seen: set[str] = set()
+        for candidate in ranked:
+            key = normalize_text(candidate.canonical_phrase)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        return deduped

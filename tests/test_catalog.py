@@ -1,6 +1,10 @@
 """Catalog manager and manual target tests."""
 
 import asyncio
+import sys
+import types
+
+import pytest
 
 from custom_components.catalog_conversation_router.catalog import CatalogManager
 from custom_components.catalog_conversation_router.models import RouterConfig
@@ -23,10 +27,106 @@ class _FakeStates:
         return [s for s in self._states if s.entity_id.startswith(f"{domain}.")]
 
 
+class _FakeEntityEntry:
+    def __init__(
+        self,
+        *,
+        entity_id: str,
+        disabled_by=None,
+        hidden_by=None,
+        exposed_by="assist",
+        aliases=None,
+        area_id=None,
+        device_id=None,
+    ) -> None:
+        self.entity_id = entity_id
+        self.disabled_by = disabled_by
+        self.hidden_by = hidden_by
+        self.exposed_by = exposed_by
+        self.aliases = aliases or []
+        self.area_id = area_id
+        self.device_id = device_id
+
+
+class _FakeEntityRegistry:
+    def __init__(self, entries) -> None:
+        self.entities = {entry.entity_id: entry for entry in entries}
+
+
+class _FakeArea:
+    def __init__(self, name: str, floor_id=None) -> None:
+        self.name = name
+        self.floor_id = floor_id
+
+
+class _FakeAreaRegistry:
+    def __init__(self, areas) -> None:
+        self._areas = areas
+
+    def async_get_area(self, area_id):
+        return self._areas.get(area_id)
+
+
+class _FakeDevice:
+    def __init__(self, name: str, area_id=None) -> None:
+        self.name = name
+        self.name_by_user = None
+        self.area_id = area_id
+
+
+class _FakeDeviceRegistry:
+    def __init__(self, devices) -> None:
+        self._devices = devices
+
+    def async_get(self, device_id):
+        return self._devices.get(device_id)
+
+
+class _FakeFloor:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeFloorRegistry:
+    def __init__(self, floors) -> None:
+        self._floors = floors
+
+    def async_get_floor(self, floor_id):
+        return self._floors.get(floor_id)
+
+
 class _FakeHass:
-    def __init__(self, states):
+    def __init__(self, states, entity_entries):
         self.states = _FakeStates(states)
         self.data = {}
+        self._entity_reg = _FakeEntityRegistry(entity_entries)
+        self._area_reg = _FakeAreaRegistry({"area_kitchen": _FakeArea("Kitchen", "f1")})
+        self._device_reg = _FakeDeviceRegistry({"dev1": _FakeDevice("Kitchen Device", "area_kitchen")})
+        self._floor_reg = _FakeFloorRegistry({"f1": _FakeFloor("First Floor")})
+
+
+def _install_fake_registry_modules(monkeypatch, hass: _FakeHass) -> None:
+    homeassistant_mod = types.ModuleType("homeassistant")
+    helpers_mod = types.ModuleType("homeassistant.helpers")
+
+    ar_mod = types.ModuleType("homeassistant.helpers.area_registry")
+    ar_mod.async_get = lambda _hass: hass._area_reg
+
+    dr_mod = types.ModuleType("homeassistant.helpers.device_registry")
+    dr_mod.async_get = lambda _hass: hass._device_reg
+
+    er_mod = types.ModuleType("homeassistant.helpers.entity_registry")
+    er_mod.async_get = lambda _hass: hass._entity_reg
+
+    fr_mod = types.ModuleType("homeassistant.helpers.floor_registry")
+    fr_mod.async_get = lambda _hass: hass._floor_reg
+
+    monkeypatch.setitem(sys.modules, "homeassistant", homeassistant_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers", helpers_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.area_registry", ar_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", dr_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", er_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.floor_registry", fr_mod)
 
 
 def _config() -> RouterConfig:
@@ -56,16 +156,53 @@ def _config() -> RouterConfig:
     )
 
 
-def test_build_entity_catalog_and_merge_manual_targets() -> None:
-    hass = _FakeHass([_FakeState("light.kitchen", "Kitchen Light")])
+def test_build_entity_catalog_and_merge_manual_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    hass = _FakeHass(
+        [_FakeState("light.kitchen", "Kitchen Light")],
+        [
+            _FakeEntityEntry(
+                entity_id="light.kitchen",
+                exposed_by="assist",
+                aliases=["Kitchen Lamp"],
+                area_id="area_kitchen",
+                device_id="dev1",
+            )
+        ],
+    )
+    _install_fake_registry_modules(monkeypatch, hass)
+
     manager = CatalogManager(hass, _config())
     catalog = asyncio.run(manager.async_rebuild())
     assert catalog.metadata.entity_count == 1
+    assert catalog.entity_targets[0].exposed is True
     assert catalog.metadata.conversation_target_count >= 1
 
 
-def test_catalog_stats_shape() -> None:
-    hass = _FakeHass([_FakeState("sensor.temp", "Temperature")])
+def test_non_exposed_entity_excluded(monkeypatch: pytest.MonkeyPatch) -> None:
+    hass = _FakeHass(
+        [
+            _FakeState("light.kitchen", "Kitchen Light"),
+            _FakeState("light.secret", "Secret Light"),
+        ],
+        [
+            _FakeEntityEntry(entity_id="light.kitchen", exposed_by="assist"),
+            _FakeEntityEntry(entity_id="light.secret", exposed_by=None),
+        ],
+    )
+    _install_fake_registry_modules(monkeypatch, hass)
+
+    manager = CatalogManager(hass, _config())
+    catalog = asyncio.run(manager.async_rebuild())
+    assert [target.entity_id for target in catalog.entity_targets] == ["light.kitchen"]
+
+
+def test_catalog_stats_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    hass = _FakeHass(
+        [_FakeState("sensor.temp", "Temperature")],
+        [_FakeEntityEntry(entity_id="sensor.temp", exposed_by="assist")],
+    )
+    _install_fake_registry_modules(monkeypatch, hass)
+
     manager = CatalogManager(hass, _config())
     asyncio.run(manager.async_rebuild())
     stats = manager.stats()

@@ -181,7 +181,7 @@ def test_turn_on_office_life_maps_to_office_light() -> None:
     assert result.best is not None
     assert result.best.candidate_id == "light.office_light"
     assert result.best.canonical_phrase.lower() == "turn on office light"
-    assert result.parsed_target_before_normalization == "the office life"
+    assert result.parsed_target_before_normalization == "office life"
     assert result.parsed_target_after_normalization == "office light"
 
 
@@ -200,3 +200,21 @@ def test_turn_off_break_room_fam_maps_to_great_room_fan() -> None:
     assert result.best.candidate_id == "fan.great_room_fan"
     assert result.best.canonical_phrase.lower() == "turn off great room fan"
     assert result.parsed_target_after_normalization == "break room fan"
+
+
+def test_parsed_target_extraction_great_room_fan() -> None:
+    matcher = FuzzyMatcher(fuzzy_threshold=0.45, ambiguity_gap=0.05)
+    result = matcher.match("turn on the great room fan", _room_catalog())
+    assert result.parsed_target_before_normalization == "great room fan"
+
+
+def test_parsed_target_extraction_office_life() -> None:
+    matcher = FuzzyMatcher(fuzzy_threshold=0.45, ambiguity_gap=0.05)
+    result = matcher.match("turn on the office life", _room_catalog())
+    assert result.parsed_target_before_normalization == "office life"
+
+
+def test_parsed_target_extraction_break_room_fam() -> None:
+    matcher = FuzzyMatcher(fuzzy_threshold=0.45, ambiguity_gap=0.05)
+    result = matcher.match("turn off the break room fam", _room_catalog())
+    assert result.parsed_target_before_normalization == "break room fam"

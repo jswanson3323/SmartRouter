@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -80,14 +81,22 @@ class FuzzyMatcher:
         if chosen_action_phrase:
             target = normalized.removeprefix(chosen_action_phrase).strip()
 
+        # Remove leading determiners from the extracted target phrase.
+        target_tokens = target.split()
+        while target_tokens and target_tokens[0] in {"the", "a", "an"}:
+            target_tokens.pop(0)
+        target = " ".join(target_tokens)
+
         area_hint = None
-        for marker in ("in ", "at ", "on "):
-            if marker in target:
-                before, _, after = target.partition(marker)
-                if after:
-                    area_hint = after.strip().split(" ")[0]
-                    target = before.strip() or target
-                    break
+        # Parse location qualifiers using word boundaries to avoid splitting inside words
+        # (e.g., "great" must not match "at").
+        qualifier_match = re.search(r"\b(in|at|on)\b\s+(.+)$", target)
+        if qualifier_match:
+            before = target[: qualifier_match.start()].strip()
+            after = qualifier_match.group(2).strip()
+            if before and after:
+                area_hint = after.split(" ")[0]
+                target = before
 
         return ParsedUtterance(
             action=chosen_action,

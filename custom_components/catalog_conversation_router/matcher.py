@@ -141,6 +141,23 @@ class FuzzyMatcher:
                 candidate_area=entity.area,
                 candidate_phrase=entity.normalized_name,
             )
+            entity_target_similarity = self._semantic_target_similarity(utter_tokens, target_tokens)
+            score_detail["token_similarity"] = max(
+                score_detail["token_similarity"],
+                entity_target_similarity,
+            )
+            score_detail["phonetic_similarity"] = max(
+                score_detail["phonetic_similarity"],
+                self._semantic_target_similarity(
+                    list(utter_phonetic),
+                    list(target_phonetic),
+                ),
+            )
+            if effective_area_hint and entity.area and entity_target_similarity > 0:
+                score_detail["structure_similarity"] = min(
+                    1.0,
+                    score_detail["structure_similarity"] + 0.15,
+                )
             final_score = self._weighted_score(score_detail)
             scores.append(
                 CandidateScore(
@@ -221,6 +238,25 @@ class FuzzyMatcher:
                     score_detail["structure_similarity"],
                     self._ordered_token_subsequence_similarity(utter_full_tokens, phrase_tokens),
                 )
+                conversation_target_similarity = self._semantic_target_similarity(
+                    utter_tokens,
+                    phrase_tokens,
+                )
+                score_detail["semantic_target_similarity"] = conversation_target_similarity
+                if utter_tokens:
+                    score_detail["token_similarity"] = max(
+                        score_detail["token_similarity"],
+                        conversation_target_similarity,
+                    )
+                    if conversation_target_similarity == 0.0:
+                        score_detail["action_compatibility"] = min(
+                            score_detail["action_compatibility"],
+                            0.15,
+                        )
+                        score_detail["structure_similarity"] = min(
+                            score_detail["structure_similarity"],
+                            0.35,
+                        )
                 phrase_score = self._weighted_score(score_detail)
                 if phrase_score > best_phrase_score:
                     best_phrase_score = phrase_score
@@ -260,6 +296,25 @@ class FuzzyMatcher:
                 score_detail["structure_similarity"],
                 self._ordered_token_subsequence_similarity(utter_full_tokens, best_target_tokens),
             )
+            conversation_target_similarity = self._semantic_target_similarity(
+                utter_tokens,
+                best_target_tokens,
+            )
+            score_detail["semantic_target_similarity"] = conversation_target_similarity
+            if utter_tokens:
+                score_detail["token_similarity"] = max(
+                    score_detail["token_similarity"],
+                    conversation_target_similarity,
+                )
+                if conversation_target_similarity == 0.0:
+                    score_detail["action_compatibility"] = min(
+                        score_detail["action_compatibility"],
+                        0.15,
+                    )
+                    score_detail["structure_similarity"] = min(
+                        score_detail["structure_similarity"],
+                        0.35,
+                    )
             final_score = self._weighted_score(score_detail)
             scores.append(
                 CandidateScore(
@@ -393,6 +448,48 @@ class FuzzyMatcher:
             utter_index += 1
 
         return matched / len(filtered_target)
+
+    def _semantic_target_similarity(self, utter_tokens: list[str], candidate_tokens: list[str]) -> float:
+        """Compare target-bearing tokens while ignoring action/filler words."""
+        utter_semantic = self._semantic_tokens(utter_tokens)
+        candidate_semantic = self._semantic_tokens(candidate_tokens)
+        if not utter_semantic or not candidate_semantic:
+            return 0.0
+        return len(set(utter_semantic) & set(candidate_semantic)) / len(set(utter_semantic) | set(candidate_semantic))
+
+    def _semantic_tokens(self, tokens: list[str]) -> list[str]:
+        """Remove action and filler words so noun matching matters more."""
+        stopwords = {
+            "a",
+            "an",
+            "the",
+            "my",
+            "turn",
+            "switch",
+            "set",
+            "what",
+            "is",
+            "status",
+            "activate",
+            "deactivate",
+            "lock",
+            "unlock",
+            "arm",
+            "disarm",
+            "open",
+            "close",
+            "enable",
+            "disable",
+            "start",
+            "stop",
+            "on",
+            "off",
+            "in",
+            "at",
+            "for",
+            "to",
+        }
+        return [token for token in tokens if token not in stopwords]
 
     def _set_similarity(self, left: set[str], right: set[str]) -> float:
         if not left or not right:

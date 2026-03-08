@@ -41,64 +41,82 @@ class EntityCatalogSource:
         included_entity_ids: set[str] = set()
 
         try:
+            from homeassistant.helpers import entity_registry as er
+            entity_reg = er.async_get(hass)
+        except Exception as err:  # pragma: no cover - depends on HA internals
+            _LOGGER.warning("Entity registry unavailable; skipping entity catalog build: %s", err)
+            return []
+
+        area_reg = None
+        device_reg = None
+        floor_reg = None
+
+        try:
             from homeassistant.helpers import area_registry as ar
             from homeassistant.helpers import device_registry as dr
-            from homeassistant.helpers import entity_registry as er
-            from homeassistant.helpers import floor_registry as fr
 
             area_reg = ar.async_get(hass)
             device_reg = dr.async_get(hass)
-            entity_reg = er.async_get(hass)
+        except Exception as err:  # pragma: no cover - optional enrichment
+            _LOGGER.debug("Area/device registry enrichment unavailable: %s", err)
+
+        try:
+            from homeassistant.helpers import floor_registry as fr
+
             floor_reg = fr.async_get(hass)
-            exposure_checker = await _async_build_exposure_checker(hass)
+        except Exception as err:  # pragma: no cover - optional enrichment
+            _LOGGER.debug("Floor registry enrichment unavailable: %s", err)
 
-            for entry in entity_reg.entities.values():
-                if entry.disabled_by is not None or entry.hidden_by is not None:
-                    _LOGGER.debug(
-                        "Entity exposure check: entity_id=%s exposed_by=%s hidden_by=%s "
-                        "disabled_by=%s included=%s reason=%s",
-                        entry.entity_id,
-                        getattr(entry, "exposed_by", None),
-                        entry.hidden_by,
-                        entry.disabled_by,
-                        False,
-                        "hidden_or_disabled",
-                    )
-                    continue
+        exposure_checker = await _async_build_exposure_checker(hass)
+        _LOGGER.debug("Assist exposure checker built=%s", exposure_checker is not None)
 
-                is_exposed = await _async_is_exposed_to_assist(
-                    entry=entry,
-                    checker=exposure_checker,
-                )
+        for entry in entity_reg.entities.values():
+            if entry.disabled_by is not None or entry.hidden_by is not None:
                 _LOGGER.debug(
-                    "Entity exposure check: entity_id=%s exposed_by=%s hidden_by=%s "
-                    "disabled_by=%s included=%s",
+                    "Entity exposure check: entity_id=%s exposed_by=%s included=%s reason=%s",
                     entry.entity_id,
                     getattr(entry, "exposed_by", None),
-                    entry.hidden_by,
-                    entry.disabled_by,
-                    is_exposed,
+                    False,
+                    "hidden_or_disabled",
                 )
-                if not is_exposed:
-                    continue
+                continue
 
-                included_entity_ids.add(entry.entity_id)
-                aliases_lookup[entry.entity_id] = list(entry.aliases or [])
-                if entry.area_id and (area := area_reg.async_get_area(entry.area_id)):
-                    area_lookup[entry.entity_id] = area.name
-                if entry.device_id and (device := device_reg.async_get(entry.device_id)):
-                    device_lookup[entry.entity_id] = device.name_by_user or device.name
-                    if device.area_id and (area := area_reg.async_get_area(device.area_id)):
-                        area_lookup.setdefault(entry.entity_id, area.name)
-                        if area.floor_id and (floor := floor_reg.async_get_floor(area.floor_id)):
-                            floor_lookup[entry.entity_id] = floor.name
-        except Exception as err:  # pragma: no cover - depends on HA internals
-            _LOGGER.warning(
-                "Entity registry unavailable for assist exposure filtering; "
-                "skipping entity catalog build: %s",
-                err,
+            is_exposed = await _async_is_exposed_to_assist(
+                entry=entry,
+                checker=exposure_checker,
             )
-            return []
+            _LOGGER.debug(
+                "Entity exposure check: entity_id=%s exposed_by=%s included=%s",
+                entry.entity_id,
+                getattr(entry, "exposed_by", None),
+                is_exposed,
+            )
+            if not is_exposed:
+                continue
+
+            included_entity_ids.add(entry.entity_id)
+            aliases_lookup[entry.entity_id] = list(entry.aliases or [])
+
+            try:
+                if area_reg is not None and entry.area_id:
+                    if area := area_reg.async_get_area(entry.area_id):
+                        area_lookup[entry.entity_id] = area.name
+            except Exception as err:  # pragma: no cover - optional enrichment
+                _LOGGER.debug("Area lookup failed for %s: %s", entry.entity_id, err)
+
+            try:
+                if device_reg is not None and entry.device_id:
+                    device = device_reg.async_get(entry.device_id)
+                    if device:
+                        device_lookup[entry.entity_id] = device.name_by_user or device.name
+                        if area_reg is not None and device.area_id:
+                            if area := area_reg.async_get_area(device.area_id):
+                                area_lookup.setdefault(entry.entity_id, area.name)
+                                if floor_reg is not None and area.floor_id:
+                                    if floor := floor_reg.async_get_floor(area.floor_id):
+                                        floor_lookup[entry.entity_id] = floor.name
+            except Exception as err:  # pragma: no cover - optional enrichment
+                _LOGGER.debug("Device/floor enrichment failed for %s: %s", entry.entity_id, err)
 
         targets: list[EntityTarget] = []
         for state in hass.states.async_all():
@@ -136,6 +154,7 @@ class EntityCatalogSource:
                 )
             )
 
+        _LOGGER.debug("Entity catalog included entity_count=%s", len(targets))
         return targets
 
 

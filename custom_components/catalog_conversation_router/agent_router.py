@@ -59,6 +59,7 @@ class AgentRouter:
             context=context,
         )
         trace.exact_local_outcome = "success" if exact.success else "failed"
+        trace.exact_local_response_text = exact.response_text
         trace.failure_category = (
             exact.failure_category.value if exact.failure_category is not None else None
         )

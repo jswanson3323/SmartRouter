@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .const import DEFAULT_LOCAL_AGENT_SENTINELS
 from .models import FailureCategory, LocalAgentOutcome
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,16 +30,17 @@ class AgentAdapter:
         try:
             from homeassistant.components import conversation
 
+            resolved_agent_id = None if agent_id in DEFAULT_LOCAL_AGENT_SENTINELS else agent_id
             response = await conversation.async_converse(
                 hass=self._hass,
                 text=text,
                 conversation_id=conversation_id,
                 context=context,
                 language=language,
-                agent_id=agent_id,
+                agent_id=resolved_agent_id,
             )
         except Exception as err:
-            _LOGGER.warning("Agent call failed for %s: %s", agent_id, err)
+            _LOGGER.warning("Agent call failed for configured_agent_id=%s resolved_agent_id=%s: %s", agent_id, None if agent_id in DEFAULT_LOCAL_AGENT_SENTINELS else agent_id, err)
             return LocalAgentOutcome(
                 success=False,
                 response=None,

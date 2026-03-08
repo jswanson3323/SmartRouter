@@ -40,4 +40,7 @@ ATTR_TEXT: Final = "text"
 
 LOGGER_NAME: Final = "custom_components.catalog_conversation_router"
 
+BUILTIN_LOCAL_AGENT_ID: Final = "homeassistant"
+DEFAULT_LOCAL_AGENT_SENTINELS: Final[frozenset[str]] = frozenset({BUILTIN_LOCAL_AGENT_ID, "__default__", "default", "builtin"})
+
 UPDATE_LISTENER: Final = "update_listener"

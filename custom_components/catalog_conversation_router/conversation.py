@@ -9,6 +9,8 @@ from .models import RouterResult
 
 _LOGGER = logging.getLogger(__name__)
 
+_IMPORT_ERROR: Exception | None = None
+
 try:  # pragma: no cover - exercised in HA runtime
     from homeassistant.components.conversation import (
         AbstractConversationAgent,
@@ -17,16 +19,15 @@ try:  # pragma: no cover - exercised in HA runtime
         async_set_agent,
         async_unset_agent,
     )
-except Exception:  # pragma: no cover - tests without HA
+    from homeassistant.helpers.intent import IntentResponse
+    _CONVERSATION_API_AVAILABLE = True
+except Exception as err:  # pragma: no cover - tests without HA
+    _CONVERSATION_API_AVAILABLE = False
+    _IMPORT_ERROR = err
     AbstractConversationAgent = object  # type: ignore[assignment]
     ConversationInput = Any  # type: ignore[assignment]
     ConversationResult = Any  # type: ignore[assignment]
-
-    def async_set_agent(hass, config_entry, agent):  # type: ignore[no-redef]
-        return None
-
-    def async_unset_agent(hass, config_entry):  # type: ignore[no-redef]
-        return None
+    IntentResponse = Any  # type: ignore[assignment]
 
 
 class CatalogRouterConversationAgent(AbstractConversationAgent):
@@ -63,8 +64,8 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
             return result.outcome.response
 
         # Fallback-only edge case where adapter failed to return a native response object.
-        from homeassistant.helpers.intent import IntentResponse
-
+        if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
+            raise RuntimeError("Conversation API unavailable for fallback response")
         intent_response = IntentResponse(language=user_input.language or self._language)
         intent_response.async_set_speech(result.outcome.response_text or "I could not process that request.")
         return ConversationResult(
@@ -76,9 +77,13 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
 
 async def async_register_agent(hass, entry, agent: CatalogRouterConversationAgent) -> None:
     """Register the custom conversation agent with HA."""
+    if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
+        raise RuntimeError("Failed to load Home Assistant conversation API") from _IMPORT_ERROR
     async_set_agent(hass, entry, agent)
 
 
 async def async_unregister_agent(hass, entry) -> None:
     """Unregister custom conversation agent."""
+    if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
+        return
     async_unset_agent(hass, entry)

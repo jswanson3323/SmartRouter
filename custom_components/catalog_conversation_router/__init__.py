@@ -137,7 +137,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime.unsub_refresh = async_track_time_interval(
             hass,
             _periodic_refresh,
-            period=timedelta(minutes=15),
+            timedelta(minutes=15),
         )
 
     await async_register_agent(hass, entry, conv_agent)

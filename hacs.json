@@ -4,5 +4,5 @@
   "domains": [
     "conversation"
   ],
-  "homeassistant": ">=2024.6.0"
+  "homeassistant": "2024.6.0"
 }

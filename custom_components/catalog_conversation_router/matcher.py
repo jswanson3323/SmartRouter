@@ -192,7 +192,7 @@ class FuzzyMatcher:
                     candidate_name=normalized_phrase,
                     alias_similarity=alias_similarity,
                     action=parsed.action,
-                    capabilities=["activate", "query", "set"],
+                    capabilities=self._infer_phrase_capabilities(normalized_phrase),
                     area_hint=parsed.area_hint,
                     candidate_area=None,
                     candidate_phrase=normalized_phrase,
@@ -214,7 +214,7 @@ class FuzzyMatcher:
                 candidate_name=best_phrase,
                 alias_similarity=alias_similarity,
                 action=parsed.action,
-                capabilities=["activate", "query", "set"],
+                capabilities=self._infer_phrase_capabilities(best_phrase),
                 area_hint=parsed.area_hint,
                 candidate_area=None,
                 candidate_phrase=best_phrase,
@@ -317,13 +317,79 @@ class FuzzyMatcher:
     def _action_compatibility(self, action: str | None, capabilities: list[str]) -> float:
         if action is None:
             return 0.6
-        if action in {"turn_on", "turn_off"}:
+
+        capability_set = set(capabilities)
+        if action in capability_set:
             return 1.0
-        if action in capabilities:
+
+        opposites = {
+            "turn_on": "turn_off",
+            "turn_off": "turn_on",
+            "activate": "deactivate",
+            "deactivate": "activate",
+            "lock": "unlock",
+            "unlock": "lock",
+            "arm": "disarm",
+            "disarm": "arm",
+            "open": "close",
+            "close": "open",
+            "enable": "disable",
+            "disable": "enable",
+        }
+        opposite = opposites.get(action)
+        if opposite and opposite in capability_set:
+            return 0.0
+
+        if action == "query" and "query" in capability_set:
             return 1.0
-        if action == "query" and "query" in capabilities:
-            return 1.0
+
         return 0.2
+
+    def _infer_phrase_capabilities(self, phrase: str) -> list[str]:
+        """Infer likely action capabilities from a conversation phrase."""
+        normalized = normalize_text(phrase)
+        tokens = normalized.split()
+        capabilities: set[str] = set()
+
+        for trigger_phrase, action in ACTION_MAP.items():
+            if normalized.startswith(trigger_phrase):
+                capabilities.add(action)
+
+        if " on" in f" {normalized}" or normalized.endswith(" on") or "start" in tokens:
+            capabilities.add("turn_on")
+        if " off" in f" {normalized}" or normalized.endswith(" off") or "stop" in tokens:
+            capabilities.add("turn_off")
+        if "toggle" in tokens:
+            capabilities.update({"turn_on", "turn_off", "activate", "deactivate"})
+        if "set" in tokens or "temperature" in tokens or "temp" in tokens:
+            capabilities.add("set")
+        if normalized.startswith("what is") or "status" in tokens:
+            capabilities.add("query")
+        if "lock" in tokens:
+            capabilities.add("lock")
+        if "unlock" in tokens:
+            capabilities.add("unlock")
+        if "arm" in tokens:
+            capabilities.add("arm")
+        if "disarm" in tokens:
+            capabilities.add("disarm")
+        if "open" in tokens:
+            capabilities.add("open")
+        if "close" in tokens:
+            capabilities.add("close")
+        if "enable" in tokens:
+            capabilities.add("enable")
+        if "disable" in tokens:
+            capabilities.add("disable")
+        if "activate" in tokens:
+            capabilities.add("activate")
+        if "deactivate" in tokens:
+            capabilities.add("deactivate")
+
+        if not capabilities:
+            capabilities.update({"activate", "query", "set"})
+
+        return sorted(capabilities)
 
     def _structure_similarity(self, utter_tokens: list[str], target_tokens: list[str]) -> float:
         if not utter_tokens or not target_tokens:

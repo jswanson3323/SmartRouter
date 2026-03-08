@@ -9,6 +9,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_LANGUAGE
+from homeassistant.helpers import selector
 
 from .const import (
     CONF_AMBIGUITY_GAP,
@@ -88,6 +89,7 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
+        agent_selector = await _async_build_agent_selector(self.hass)
 
         if user_input is not None:
             try:
@@ -108,8 +110,8 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_LOCAL_AGENT_ID): str,
-                    vol.Required(CONF_LLM_AGENT_ID): str,
+                    vol.Required(CONF_LOCAL_AGENT_ID): agent_selector,
+                    vol.Required(CONF_LLM_AGENT_ID): agent_selector,
                     vol.Optional(CONF_LANGUAGE, default="en"): str,
                     vol.Optional(CONF_FUZZY_ENABLED, default=DEFAULT_FUZZY_ENABLED): bool,
                     vol.Optional(
@@ -159,6 +161,7 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         errors: dict[str, str] = {}
+        agent_selector = await _async_build_agent_selector(self.hass)
         current_manual = self._entry.options.get(
             CONF_MANUAL_TARGETS,
             self._entry.data.get(CONF_MANUAL_TARGETS, []),
@@ -189,11 +192,19 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="init",
-            data_schema=self._build_options_schema(current_manual=current_manual),
+            data_schema=self._build_options_schema(
+                current_manual=current_manual,
+                agent_selector=agent_selector,
+            ),
             errors=errors,
         )
 
-    def _build_options_schema(self, *, current_manual: list[dict[str, Any]]) -> vol.Schema:
+    def _build_options_schema(
+        self,
+        *,
+        current_manual: list[dict[str, Any]],
+        agent_selector,
+    ) -> vol.Schema:
         """Build options form schema."""
         return vol.Schema(
             {
@@ -203,14 +214,14 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                         CONF_LOCAL_AGENT_ID,
                         self._entry.data.get(CONF_LOCAL_AGENT_ID, ""),
                     ),
-                ): str,
+                ): agent_selector,
                 vol.Required(
                     CONF_LLM_AGENT_ID,
                     default=self._entry.options.get(
                         CONF_LLM_AGENT_ID,
                         self._entry.data.get(CONF_LLM_AGENT_ID, ""),
                     ),
-                ): str,
+                ): agent_selector,
                 vol.Optional(
                     CONF_LANGUAGE,
                     default=self._entry.options.get(
@@ -302,3 +313,40 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                 ): str,
             }
         )
+
+
+async def _async_build_agent_selector(hass):
+    """Build a dropdown selector of conversation agents (value is agent_id/ULID)."""
+    options: list[selector.SelectOptionDict] = []
+    seen: set[str] = set()
+
+    try:
+        from homeassistant.components import conversation
+
+        infos: list[Any] = []
+        if hasattr(conversation, "async_get_conversation_agent_info"):
+            infos = await conversation.async_get_conversation_agent_info(hass)
+        elif hasattr(conversation, "async_get_agent_info"):
+            infos = await conversation.async_get_agent_info(hass)
+
+        for info in infos or []:
+            agent_id = getattr(info, "id", None) or getattr(info, "agent_id", None)
+            if not agent_id or agent_id in seen:
+                continue
+            seen.add(agent_id)
+            name = getattr(info, "name", None) or str(agent_id)
+            options.append(selector.SelectOptionDict(value=str(agent_id), label=str(name)))
+    except Exception:
+        # If lookup is unavailable, keep selector open for manual entry.
+        options = []
+
+    options.sort(key=lambda item: item["label"].lower())
+
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=options,
+            mode=selector.SelectSelectorMode.DROPDOWN,
+            custom_value=True,
+            sort=False,
+        )
+    )

@@ -141,6 +141,9 @@ class LocalAgentOutcome:
     response_text: str | None
     failure_category: FailureCategory | None
     raw: Any | None
+    response_type: str | None = None
+    error_code: str | None = None
+    processed_locally: bool | None = None
 
 
 @dataclass(slots=True)
@@ -165,6 +168,9 @@ class ResolutionTrace:
     selected_path: ResolutionPath = ResolutionPath.FAILED
     exact_local_outcome: str | None = None
     exact_local_response_text: str | None = None
+    exact_local_response_type: str | None = None
+    exact_local_error_code: str | None = None
+    exact_local_processed_locally: bool | None = None
     failure_category: str | None = None
     top_fuzzy_candidates: list[dict[str, Any]] = field(default_factory=list)
     chosen_canonical_phrase: str | None = None

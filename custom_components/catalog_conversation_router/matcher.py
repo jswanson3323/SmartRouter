@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-from .models import CandidateScore, CandidateType, Catalog, MatchResult
+from .models import CandidateScore, CandidateType, Catalog, EntityTarget, MatchResult
 from .phonetics import normalize_text, phonetic_key, phonetic_tokens, tokenize
 
 ACTION_MAP = {
@@ -45,6 +45,15 @@ CANONICAL_ACTION_TEXT = {
     "close": "close",
     "enable": "enable",
     "disable": "disable",
+}
+
+DOMAIN_HINT_MAP: dict[str, set[str]] = {
+    "fan": {"fan", "fans"},
+    "light": {"light", "lights", "lamp", "lamps"},
+    "switch": {"switch", "switches", "outlet", "outlets", "plug", "plugs"},
+    "media_player": {"tv", "television", "speaker", "stereo", "receiver", "media"},
+    "cover": {"blind", "blinds", "shade", "shades", "cover", "covers", "curtain", "curtains"},
+    "climate": {"thermostat", "heater", "ac", "climate", "temperature"},
 }
 
 
@@ -136,6 +145,12 @@ class FuzzyMatcher:
         utter_full_tokens = tokenize(normalized)
         utter_full_phonetic = set(phonetic_tokens(utter_full_tokens))
         effective_area_hint = parsed.area_hint or (normalize_text(origin_area) if origin_area else None)
+        area_scoped_domain_entity_id = self._resolve_area_scoped_domain_entity(
+            utter_tokens=utter_tokens,
+            action=parsed.action,
+            entities=catalog.entity_targets,
+            area_hint=effective_area_hint,
+        )
 
         scores: list[CandidateScore] = []
 
@@ -189,7 +204,15 @@ class FuzzyMatcher:
                 elif area_match == 0 and (entity_target_similarity > 0 or domain_hint_match > 0):
                     score_detail["structure_similarity"] = max(0.0, score_detail["structure_similarity"] - 0.1)
 
+            if area_scoped_domain_entity_id and entity.entity_id == area_scoped_domain_entity_id:
+                score_detail["token_similarity"] = min(1.0, score_detail["token_similarity"] + 0.25)
+                score_detail["structure_similarity"] = min(1.0, score_detail["structure_similarity"] + 0.25)
+                score_detail["phonetic_similarity"] = min(1.0, score_detail["phonetic_similarity"] + 0.10)
+                score_detail["area_scoped_domain_resolution"] = 1.0
+
             final_score = self._weighted_score(score_detail)
+            if area_scoped_domain_entity_id and entity.entity_id == area_scoped_domain_entity_id:
+                final_score = max(final_score, 0.95)
             scores.append(
                 CandidateScore(
                     candidate_id=entity.entity_id,
@@ -681,16 +704,8 @@ class FuzzyMatcher:
         aliases: list[str],
     ) -> float:
         """Detect generic domain nouns like fan/light/tv in the utterance."""
-        hint_map = {
-            "fan": {"fan", "fans"},
-            "light": {"light", "lights", "lamp", "lamps"},
-            "switch": {"switch", "switches", "outlet", "outlets", "plug", "plugs"},
-            "media_player": {"tv", "television", "speaker", "stereo", "receiver", "media"},
-            "cover": {"blind", "blinds", "shade", "shades", "cover", "covers", "curtain", "curtains"},
-            "climate": {"thermostat", "heater", "ac", "climate", "temperature"},
-        }
         utter_set = set(utter_tokens)
-        domain_terms = hint_map.get(domain, set())
+        domain_terms = DOMAIN_HINT_MAP.get(domain, set())
         if utter_set & domain_terms:
             return 0.25
 
@@ -700,6 +715,52 @@ class FuzzyMatcher:
             if name_tokens & utter_set & domain_terms:
                 return 0.2
         return 0.0
+
+    def _resolve_area_scoped_domain_entity(
+        self,
+        *,
+        utter_tokens: list[str],
+        action: str | None,
+        entities: list[EntityTarget],
+        area_hint: str | None,
+    ) -> str | None:
+        """Resolve deterministic area-scoped entity for generic domain targets.
+
+        Example: "turn on the light" from "master bedroom" should resolve to
+        the only `light` entity in that area, if exactly one exists.
+        """
+        if not area_hint:
+            return None
+
+        inferred_domain = self._infer_domain_from_tokens(utter_tokens)
+        if not inferred_domain:
+            return None
+
+        hint_tokens = set(tokenize(area_hint))
+        if not hint_tokens:
+            return None
+
+        scoped_candidates = []
+        for entity in entities:
+            if entity.domain != inferred_domain or not entity.area:
+                continue
+            entity_area_tokens = set(tokenize(normalize_text(entity.area)))
+            if hint_tokens <= entity_area_tokens:
+                if self._action_compatibility(action, entity.capabilities) > 0.0:
+                    scoped_candidates.append(entity)
+
+        if len(scoped_candidates) == 1:
+            return scoped_candidates[0].entity_id
+        return None
+
+    def _infer_domain_from_tokens(self, utter_tokens: list[str]) -> str | None:
+        utter_set = set(utter_tokens)
+        if not utter_set:
+            return None
+        for domain, terms in DOMAIN_HINT_MAP.items():
+            if utter_set & terms:
+                return domain
+        return None
 
     def _set_similarity(self, left: set[str], right: set[str]) -> float:
         if not left or not right:

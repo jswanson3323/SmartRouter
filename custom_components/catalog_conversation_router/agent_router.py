@@ -98,9 +98,9 @@ class AgentRouter:
                         context=context,
                     )
                 else:
-                    fuzzy_outcome = exact
+                    fuzzy_outcome = None
 
-                if fuzzy_outcome.success or dry_run:
+                if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
                     trace.selected_path = ResolutionPath.FUZZY_LOCAL
                     trace.final_executor = "local"
                     return RouterResult(
@@ -142,9 +142,9 @@ class AgentRouter:
                         context=context,
                     )
                 else:
-                    translated_outcome = exact
+                    translated_outcome = None
 
-                if translated_outcome.success or dry_run:
+                if dry_run or (translated_outcome is not None and translated_outcome.success):
                     trace.selected_path = ResolutionPath.LLM_TRANSLATED_LOCAL
                     trace.final_executor = "local"
                     return RouterResult(

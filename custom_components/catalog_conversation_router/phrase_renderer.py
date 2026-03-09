@@ -121,12 +121,21 @@ def _extract_slots(pattern: str, utterance_tokens: list[str]) -> dict[str, str]:
             continue
         slot_name = normalize_text(slot_name_match.group(1))
 
-        prev_literal = " ".join(
-            part for part in parts[:slot_idx] if not SLOT_RE.fullmatch(part)
-        )
-        next_literal = " ".join(
-            part for part in parts[slot_idx + 1 :] if not SLOT_RE.fullmatch(part)
-        )
+        prev_literal = ""
+        for part in reversed(parts[:slot_idx]):
+            if SLOT_RE.fullmatch(part):
+                continue
+            if part.strip():
+                prev_literal = part
+                break
+
+        next_literal = ""
+        for part in parts[slot_idx + 1 :]:
+            if SLOT_RE.fullmatch(part):
+                continue
+            if part.strip():
+                next_literal = part
+                break
 
         prev_tokens = tokenize(prev_literal)
         next_tokens = tokenize(next_literal)
@@ -155,6 +164,7 @@ def _extract_slots(pattern: str, utterance_tokens: list[str]) -> dict[str, str]:
             cursor = slot_end
         else:
             slots[slot_name] = ""
+            cursor = slot_start
 
     return slots
 

@@ -61,7 +61,11 @@ class LLMAdapter:
             )
 
         parsed = self._parse_translation_json(outcome.response_text)
-        parsed.raw_text = outcome.response_text
+
+        # Prevent accidental speech/debug leakage from LLM output
+        # Only structured fields should propagate through the router
+        parsed.raw_text = None
+
         return parsed
 
     async def async_final_fallback(
@@ -124,13 +128,14 @@ class LLMAdapter:
             f"Origin-area entity targets: {area_entity_candidates}. "
             f"Entity targets: {entity_candidates}. "
             f"Conversation targets: {conversation_candidates}. "
-            "Return exactly one JSON object with schema: "
+            "Return ONLY a single JSON object and nothing else. Do not include explanations, prefixes, suffixes, or text before or after the JSON. If unsure, return mode=fallback_answer with canonical_text=null. JSON schema: "
             f"{json.dumps(schema)}"
         )
 
     def _parse_translation_json(self, text: str) -> LLMTranslationResult:
         match = JSON_BLOCK_RE.search(text)
         if not match:
+            _LOGGER.debug("LLM translation returned no JSON block. Raw text suppressed.")
             return LLMTranslationResult(
                 mode="fallback_answer",
                 canonical_text=None,
@@ -143,6 +148,7 @@ class LLMAdapter:
         try:
             payload = json.loads(match.group(0))
         except json.JSONDecodeError:
+            _LOGGER.debug("LLM translation produced invalid JSON. Raw text suppressed.")
             _LOGGER.debug("Invalid LLM JSON payload: %s", text)
             return LLMTranslationResult(
                 mode="fallback_answer",

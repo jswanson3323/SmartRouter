@@ -946,7 +946,26 @@ class FuzzyMatcher:
 
     def _normalize_asr_target_tokens(self, target_phrase: str) -> list[str]:
         """Normalize likely ASR noun substitutions before scoring."""
-        return tokenize(target_phrase)
+        tokens = tokenize(target_phrase)
+        if not tokens:
+            return tokens
+
+        all_domain_terms = sorted(
+            {term for terms in DOMAIN_HINT_MAP.values() for term in terms},
+            key=len,
+            reverse=True,
+        )
+        corrected: list[str] = []
+        for token in tokens:
+            best = token
+            best_ratio = 0.0
+            for term in all_domain_terms:
+                ratio = SequenceMatcher(a=token, b=term).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best = term
+            corrected.append(best if best_ratio >= 0.84 else token)
+        return corrected
 
     def _whole_target_similarity(self, parsed_target: str, candidate_target: str) -> float:
         """Compare full target phrases using edit and phonetic phrase similarity."""

@@ -32,7 +32,7 @@ class _FakeMatcher:
     def __init__(self, result):
         self._result = result
 
-    def match(self, text, catalog):
+    def match(self, text, catalog, origin_area=None):
         return self._result
 
 
@@ -174,6 +174,31 @@ def test_llm_translated_local_success() -> None:
         )
     )
     assert result.path.value == "llm_translated_local"
+
+
+def test_area_scoped_ambiguity_still_executes_locally() -> None:
+    best = _Candidate("turn on master bedroom light", score=0.90)
+    best.detail = {"area_scoped_domain_resolution": 1.0}
+    second = _Candidate("turn on gym light", score=0.89)
+    match = _MatchResult(best=best, top=[best, second])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(True)]),
+        llm_adapter=_FakeLLMAdapter(_Translation(True, "turn on gym light"), _outcome(True)),
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the ligh",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+    assert result.path.value == "fuzzy_local"
+    assert result.trace.assist_pipeline_input == "turn on master bedroom light"
 
 
 def test_final_fallback_path() -> None:

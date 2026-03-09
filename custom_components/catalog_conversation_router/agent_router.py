@@ -132,6 +132,35 @@ class AgentRouter:
                         trace=trace,
                     )
             else:
+                candidate_detail = match_result.best.detail or {}
+                forced_area_resolution = (
+                    decision.reason == "ambiguity_gap_too_small"
+                    and candidate_detail.get("area_scoped_domain_resolution") == 1.0
+                )
+                if forced_area_resolution:
+                    trace.chosen_canonical_phrase = match_result.best.canonical_phrase
+                    trace.assist_pipeline_input = match_result.best.canonical_phrase
+                    trace.rendered_from_pattern = False
+                    trace.rendered_slots = {}
+                    if not dry_run:
+                        fuzzy_outcome = await self._agent_adapter.async_process(
+                            agent_id=self._config.local_agent_id,
+                            text=match_result.best.canonical_phrase,
+                            language=language,
+                            conversation_id=conversation_id,
+                            context=context,
+                        )
+                    else:
+                        fuzzy_outcome = None
+
+                    if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
+                        trace.selected_path = ResolutionPath.FUZZY_LOCAL
+                        trace.final_executor = "local"
+                        return RouterResult(
+                            path=ResolutionPath.FUZZY_LOCAL,
+                            outcome=fuzzy_outcome,
+                            trace=trace,
+                        )
                 _LOGGER.debug("Fuzzy candidate rejected: %s", decision.reason)
 
         # 2) LLM translation to local
@@ -144,6 +173,7 @@ class AgentRouter:
                 max_candidates=self._config.max_llm_candidates,
                 conversation_id=conversation_id,
                 context=context,
+                origin_area=resolved_origin_area,
             )
             trace.llm_translation_summary = {
                 "mode": translation.mode,

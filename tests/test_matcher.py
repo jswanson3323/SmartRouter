@@ -267,3 +267,53 @@ def test_area_scoped_generic_light_resolves_to_master_bedroom() -> None:
     assert result.best.candidate_id == "light.master_bedroom_light"
     assert result.best.canonical_phrase.lower() == "turn on master bedroom light"
     assert result.matched is True
+
+
+def test_area_scoped_generic_ligh_typo_resolves_to_master_bedroom() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r4",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="light.master_bedroom_light",
+                name="Master Bedroom Light",
+                normalized_name="master bedroom light",
+                aliases=[],
+                domain="light",
+                area="Master Bedroom",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["master", "bedroom", "light"],
+                phonetic_tokens=["M236", "B365", "L230"],
+            ),
+            EntityTarget(
+                entity_id="light.gym_light",
+                name="Gym Light",
+                normalized_name="gym light",
+                aliases=[],
+                domain="light",
+                area="Gym",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["gym", "light"],
+                phonetic_tokens=["J500", "L230"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
+    result = matcher.match("turn on the ligh", catalog, origin_area="Master Bedroom")
+    assert result.best is not None
+    assert result.best.candidate_id == "light.master_bedroom_light"
+    assert result.best.canonical_phrase.lower() == "turn on master bedroom light"
+    assert result.parsed_target_after_normalization == "light"
+    assert result.matched is True

@@ -30,6 +30,7 @@ class LLMAdapter:
         max_candidates: int,
         conversation_id: str | None,
         context: Any,
+        origin_area: str | None = None,
     ) -> LLMTranslationResult:
         """Ask LLM agent to output strict translation JSON."""
         prompt = self._build_translation_prompt(
@@ -37,6 +38,7 @@ class LLMAdapter:
             language=language,
             catalog=catalog,
             max_candidates=max_candidates,
+            origin_area=origin_area,
         )
 
         outcome = await self._agent_adapter.async_process(
@@ -87,11 +89,19 @@ class LLMAdapter:
         language: str,
         catalog: Catalog,
         max_candidates: int,
+        origin_area: str | None,
     ) -> str:
         entity_candidates = [e.name for e in catalog.entity_targets[:max_candidates]]
         conversation_candidates = [
             t.display_name for t in catalog.conversation_targets[:max_candidates]
         ]
+        area_entity_candidates = [
+            e.name
+            for e in catalog.entity_targets
+            if origin_area
+            and e.area
+            and origin_area.strip().lower() == e.area.strip().lower()
+        ][:max_candidates]
 
         schema = {
             "mode": "translate_for_local | fallback_answer",
@@ -106,8 +116,12 @@ class LLMAdapter:
             "Do NOT execute commands, only translate when confident. "
             "Correct likely ASR mistakes but only to listed valid targets. "
             "Never invent entities, areas, or custom targets. "
+            "If origin area is provided, strongly prefer matching entities in that area. "
+            "For generic room-local requests like 'turn on the light', choose an in-area entity when available. "
             f"Language: {language}. "
             f"Original utterance: {utterance!r}. "
+            f"Origin area: {origin_area!r}. "
+            f"Origin-area entity targets: {area_entity_candidates}. "
             f"Entity targets: {entity_candidates}. "
             f"Conversation targets: {conversation_candidates}. "
             "Return exactly one JSON object with schema: "

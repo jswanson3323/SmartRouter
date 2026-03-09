@@ -1,6 +1,7 @@
 """LLM translation parser tests."""
 
 from custom_components.catalog_conversation_router.llm_adapter import LLMAdapter
+from custom_components.catalog_conversation_router.models import Catalog, CatalogMetadata, EntityTarget
 
 
 class _FakeAgentAdapter:
@@ -21,3 +22,56 @@ def test_valid_llm_json_translation() -> None:
     result = adapter._parse_translation_json(text)
     assert result.valid is True
     assert result.canonical_text == "turn on kitchen light"
+
+
+def test_translation_prompt_includes_origin_area_context() -> None:
+    adapter = LLMAdapter(_FakeAgentAdapter())
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r1",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="light.master_bedroom_light",
+                name="Master Bedroom Light",
+                normalized_name="master bedroom light",
+                aliases=[],
+                domain="light",
+                area="Master Bedroom",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["master", "bedroom", "light"],
+                phonetic_tokens=["M236", "B365", "L230"],
+            ),
+            EntityTarget(
+                entity_id="light.gym_light",
+                name="Gym Light",
+                normalized_name="gym light",
+                aliases=[],
+                domain="light",
+                area="Gym",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["gym", "light"],
+                phonetic_tokens=["J500", "L230"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    prompt = adapter._build_translation_prompt(
+        utterance="turn on the light",
+        language="en",
+        catalog=catalog,
+        max_candidates=20,
+        origin_area="Master Bedroom",
+    )
+    assert "Origin area: 'Master Bedroom'" in prompt
+    assert "Origin-area entity targets: ['Master Bedroom Light']" in prompt

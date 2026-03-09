@@ -77,6 +77,25 @@ class FuzzyMatcher:
                 chosen_action = ACTION_MAP[phrase]
                 break
 
+        # Special-case question/query patterns where `on/in/at` is part of the
+        # semantic target rather than an area qualifier.
+        timer_remaining_match = re.match(
+            r"^(how much time is left)\s+(?:on|for)\s+(.+)$",
+            normalized,
+        )
+        if timer_remaining_match:
+            target = timer_remaining_match.group(2).strip()
+            target_tokens = target.split()
+            while target_tokens and target_tokens[0] in {"the", "a", "an", "my"}:
+                target_tokens.pop(0)
+            target = " ".join(target_tokens)
+            return ParsedUtterance(
+                action="query",
+                action_phrase=timer_remaining_match.group(1),
+                target_phrase=target,
+                area_hint=None,
+            )
+
         target = normalized
         if chosen_action_phrase:
             target = normalized.removeprefix(chosen_action_phrase).strip()
@@ -95,7 +114,8 @@ class FuzzyMatcher:
             before = target[: qualifier_match.start()].strip()
             after = qualifier_match.group(2).strip()
             if before and after:
-                area_hint = after.split(" ")[0]
+                area_tokens = after.split()
+                area_hint = area_tokens[0] if area_tokens and area_tokens[0] not in {"the", "a", "an", "my"} else None
                 target = before
 
         return ParsedUtterance(

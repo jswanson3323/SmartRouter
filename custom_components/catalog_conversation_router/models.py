@@ -178,6 +178,7 @@ class ResolutionTrace:
     failure_category: str | None = None
     top_fuzzy_candidates: list[dict[str, Any]] = field(default_factory=list)
     chosen_canonical_phrase: str | None = None
+    assist_pipeline_input: str | None = None
     llm_translation_summary: dict[str, Any] | None = None
     final_executor: str | None = None
     catalog_revision: str | None = None

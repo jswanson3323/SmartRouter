@@ -76,6 +76,7 @@ class AgentRouter:
         )
 
         if exact.success:
+            trace.assist_pipeline_input = text
             trace.selected_path = ResolutionPath.EXACT_LOCAL
             trace.final_executor = "local"
             return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
@@ -107,6 +108,7 @@ class AgentRouter:
 
             if decision.allowed:
                 trace.chosen_canonical_phrase = match_result.best.canonical_phrase
+                trace.assist_pipeline_input = match_result.best.canonical_phrase
                 if not dry_run:
                     fuzzy_outcome = await self._agent_adapter.async_process(
                         agent_id=self._config.local_agent_id,
@@ -150,6 +152,7 @@ class AgentRouter:
 
             if translation.valid and translation.canonical_text:
                 trace.chosen_canonical_phrase = translation.canonical_text
+                trace.assist_pipeline_input = translation.canonical_text
                 if not dry_run:
                     translated_outcome = await self._agent_adapter.async_process(
                         agent_id=self._config.local_agent_id,

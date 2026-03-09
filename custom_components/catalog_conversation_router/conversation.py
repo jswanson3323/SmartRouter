@@ -63,7 +63,18 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
             _LOGGER.debug("Resolution trace: %s", result.trace.as_dict())
 
         if result.outcome.response is not None:
-            return result.outcome.response
+            response = result.outcome.response
+
+            # Preserve downstream local-processing metadata only when the
+            # request was actually handled by the local assistant. Do not mark
+            # LLM-handled responses as locally processed.
+            if result.outcome.processed_locally is True:
+                try:
+                    setattr(response, "processed_locally", True)
+                except Exception:
+                    pass
+
+            return response
 
         # Fallback-only edge case where adapter failed to return a native response object.
         if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover

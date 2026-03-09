@@ -1,6 +1,8 @@
 """Main routing pipeline implementation."""
 
+
 from __future__ import annotations
+import re
 
 import logging
 from typing import Any
@@ -205,7 +207,7 @@ class AgentRouter:
         if "timer" in raw_phrase and "{when}" in raw_phrase:
             if "{name}" in raw_phrase:
                 match = re.search(
-                    r"(set|start|create|begin)\s+(?:a|an\s+)?(.+?)\s+timer\s+(?:for|in|at)\s+(.+)$",
+                    r"\b(set|start|create|begin)\b\s+(?:a|an\s+)?(.+?)\s+timer\s+(?:for|in|at)\s+(.+)$",
                     cleaned_original,
                 )
                 if match:
@@ -216,7 +218,7 @@ class AgentRouter:
                     return f"{verb} {article} {name} timer for {when}"
 
             match = re.search(
-                r"(set|start|create|begin)\s+(?:a|an\s+)?timer\s+(?:for|in|at)\s+(.+)$",
+                r"\b(set|start|create|begin)\b\s+(?:a|an\s+)?timer\s+(?:for|in|at)\s+(.+)$",
                 cleaned_original,
             )
             if match:

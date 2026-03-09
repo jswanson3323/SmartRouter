@@ -435,6 +435,11 @@ class FuzzyMatcher:
             )
 
         ranked = sorted(scores, key=lambda item: item.score, reverse=True)
+        if area_scoped_domain_entity_id:
+            resolved = next((c for c in ranked if c.candidate_id == area_scoped_domain_entity_id), None)
+            if resolved:
+                remaining = [c for c in ranked if c.candidate_id != area_scoped_domain_entity_id]
+                ranked = [resolved, *remaining]
         ranked = self._dedupe_by_canonical_phrase(ranked)
         top = ranked[:3]
         best = top[0] if top else None
@@ -445,6 +450,8 @@ class FuzzyMatcher:
             and best.score >= self._fuzzy_threshold
             and (best.score - (second.score if second else 0.0)) >= self._ambiguity_gap
         )
+        if area_scoped_domain_entity_id and best and best.candidate_id == area_scoped_domain_entity_id:
+            matched = True
 
         return MatchResult(
             matched=matched,

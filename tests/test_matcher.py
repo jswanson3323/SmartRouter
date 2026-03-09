@@ -266,3 +266,4 @@ def test_area_scoped_generic_light_resolves_to_master_bedroom() -> None:
     assert result.best is not None
     assert result.best.candidate_id == "light.master_bedroom_light"
     assert result.best.canonical_phrase.lower() == "turn on master bedroom light"
+    assert result.matched is True

@@ -269,6 +269,24 @@ class FuzzyMatcher:
                             0.15 if parsed.action in {"turn_on", "turn_off", "set", "open", "close", "lock", "unlock"} else 0.35,
                         )
                         score_detail["whole_target_similarity"] = min(score_detail["whole_target_similarity"], 0.25)
+
+                # Insert slot specificity bonus logic here
+                slot_specificity_bonus = self._conversation_slot_specificity_bonus(
+                    utterance_normalized=normalized,
+                    raw_phrase=phrase,
+                    scoring_phrase=scoring_phrase,
+                )
+                score_detail["slot_specificity_bonus"] = slot_specificity_bonus
+                if slot_specificity_bonus > 0:
+                    score_detail["structure_similarity"] = min(
+                        1.0,
+                        score_detail["structure_similarity"] + slot_specificity_bonus,
+                    )
+                    score_detail["token_similarity"] = min(
+                        1.0,
+                        score_detail["token_similarity"] + (slot_specificity_bonus * 0.5),
+                    )
+
                 phrase_score = self._weighted_score(score_detail)
                 if phrase_score > best_phrase_score:
                     best_phrase_score = phrase_score
@@ -327,6 +345,24 @@ class FuzzyMatcher:
                         score_detail["structure_similarity"],
                         0.35,
                     )
+
+            # Insert slot specificity bonus logic here for fallback block
+            slot_specificity_bonus = self._conversation_slot_specificity_bonus(
+                utterance_normalized=normalized,
+                raw_phrase=best_phrase_raw,
+                scoring_phrase=best_phrase_for_scoring,
+            )
+            score_detail["slot_specificity_bonus"] = slot_specificity_bonus
+            if slot_specificity_bonus > 0:
+                score_detail["structure_similarity"] = min(
+                    1.0,
+                    score_detail["structure_similarity"] + slot_specificity_bonus,
+                )
+                score_detail["token_similarity"] = min(
+                    1.0,
+                    score_detail["token_similarity"] + (slot_specificity_bonus * 0.5),
+                )
+
             final_score = self._weighted_score(score_detail)
             scores.append(
                 CandidateScore(
@@ -502,6 +538,70 @@ class FuzzyMatcher:
             "to",
         }
         return [token for token in tokens if token not in stopwords]
+
+
+    def _conversation_slot_specificity_bonus(
+        self,
+        *,
+        utterance_normalized: str,
+        raw_phrase: str,
+        scoring_phrase: str,
+    ) -> float:
+        """Reward conversation phrases whose slot shape matches the utterance.
+
+        This helps more specific sentence patterns win over simpler generic ones.
+        For example:
+        - `set [a] timer for {when}`
+        - `(set|start|create|begin) [a | an] {name} timer for {when}`
+
+        When the utterance is `set a test timer for five minutes`, the second
+        pattern should win because the utterance clearly contains both a timer
+        name and a time expression.
+        """
+        bonus = 0.0
+        raw_lower = raw_phrase.lower()
+        normalized_utterance = normalize_text(utterance_normalized)
+
+        has_name_slot = "{name}" in raw_lower
+        has_when_slot = "{when}" in raw_lower
+        has_amount_slot = "{amount}" in raw_lower
+
+        if has_name_slot and self._utterance_implies_named_timer(normalized_utterance):
+            bonus += 0.18
+        elif not has_name_slot and self._utterance_implies_named_timer(normalized_utterance):
+            if "timer" in scoring_phrase:
+                bonus -= 0.08
+
+        if has_when_slot and re.search(r"\b(for|in|at)\b\s+.+$", normalized_utterance):
+            bonus += 0.12
+
+        if has_amount_slot and re.search(r"\bto\b\s+.+$", normalized_utterance):
+            bonus += 0.08
+
+        return max(-0.1, min(0.35, bonus))
+
+    def _utterance_implies_named_timer(self, normalized_utterance: str) -> bool:
+        """Return True when utterance looks like it names a timer.
+
+        Examples that should return True:
+        - `set a test timer for five minutes`
+        - `start laundry timer for 10 minutes`
+
+        Examples that should return False:
+        - `set a timer for five minutes`
+        - `start timer for 10 minutes`
+        """
+        match = re.search(r"\b(?:set|start|create|begin)\b\s+(?:a|an\s+)?(.+?)\s+timer\b", normalized_utterance)
+        if not match:
+            return False
+
+        name_part = normalize_text(match.group(1))
+        name_tokens = [
+            token
+            for token in tokenize(name_part)
+            if token not in {"a", "an", "the", "my", "timer", "for", "in", "at"}
+        ]
+        return len(name_tokens) >= 1
 
 
     def _domain_hint_match(

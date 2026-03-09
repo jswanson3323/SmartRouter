@@ -11,8 +11,7 @@ from .models import CandidateType, Catalog, LLMTranslationResult
 
 _LOGGER = logging.getLogger(__name__)
 
-JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
-
+JSON_BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
 
 class LLMAdapter:
     """Build prompts and parse structured translation output."""
@@ -119,7 +118,7 @@ class LLMAdapter:
             "You are a translation layer for Home Assistant conversation routing. "
             "Do NOT execute commands, only translate when confident. "
             "Correct likely ASR mistakes but only to listed valid targets. "
-            "Never invent entities, areas, or custom targets. "
+            "Never invent entities, areas, custom targets, or canonical commands. canonical_text must use only the exact listed entity target names or exact listed conversation target phrases; otherwise return mode=fallback_answer with canonical_text=null. "
             "If origin area is provided, strongly prefer matching entities in that area. "
             "For generic room-local requests like 'turn on the light', choose an in-area entity when available. "
             f"Language: {language}. "
@@ -133,6 +132,13 @@ class LLMAdapter:
         )
 
     def _parse_translation_json(self, text: str) -> LLMTranslationResult:
+        # First try strict JSON parsing (best case: model returned pure JSON)
+        try:
+            payload = json.loads(text.strip())
+            text = json.dumps(payload)
+        except Exception:
+            pass
+
         match = JSON_BLOCK_RE.search(text)
         if not match:
             _LOGGER.debug("LLM translation returned no JSON block. Raw text suppressed.")
@@ -146,7 +152,7 @@ class LLMAdapter:
             )
 
         try:
-            payload = json.loads(match.group(0))
+            payload = json.loads(match.group(0).strip())
         except json.JSONDecodeError:
             _LOGGER.debug("LLM translation produced invalid JSON. Raw text suppressed.")
             _LOGGER.debug("Invalid LLM JSON payload: %s", text)
@@ -160,7 +166,10 @@ class LLMAdapter:
             )
 
         mode = str(payload.get("mode", "fallback_answer"))
+        mode = mode.strip().lower()
         canonical_text = payload.get("canonical_text")
+        if isinstance(canonical_text, str):
+            canonical_text = canonical_text.strip()
         confidence = float(payload.get("confidence", 0.0) or 0.0)
         raw_target_type = str(payload.get("target_type", "unknown"))
         notes = payload.get("notes")

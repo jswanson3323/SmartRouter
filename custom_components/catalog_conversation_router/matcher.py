@@ -56,6 +56,21 @@ DOMAIN_HINT_MAP: dict[str, set[str]] = {
     "climate": {"thermostat", "heater", "ac", "climate", "temperature"},
 }
 
+# Query-style prefixes for generic queries.
+QUERY_PREFIXES = (
+    "what is",
+    "whats",
+    "status",
+    "what are",
+    "tell me",
+    "do i have",
+    "are there",
+    "how much",
+    "how long",
+    "when does",
+    "when is",
+)
+
 
 @dataclass(slots=True)
 class ParsedUtterance:
@@ -86,28 +101,28 @@ class FuzzyMatcher:
                 chosen_action = ACTION_MAP[phrase]
                 break
 
-        # Special-case question/query patterns where `on/in/at` is part of the
-        # semantic target rather than an area qualifier.
-        timer_remaining_match = re.match(
-            r"^(how much time is left)\s+(?:on|for)\s+(.+)$",
-            normalized,
-        )
-        if timer_remaining_match:
-            target = timer_remaining_match.group(2).strip()
-            target_tokens = target.split()
-            while target_tokens and target_tokens[0] in {"the", "a", "an", "my"}:
-                target_tokens.pop(0)
-            target = " ".join(target_tokens)
-            return ParsedUtterance(
-                action="query",
-                action_phrase=timer_remaining_match.group(1),
-                target_phrase=target,
-                area_hint=None,
-            )
-
         target = normalized
         if chosen_action_phrase:
             target = normalized.removeprefix(chosen_action_phrase).strip()
+
+        # Generic query parsing: handle "what is ... on/for/in/at ..." and similar.
+        query_match = re.match(r"^(.+?)\s+\b(on|for|in|at)\b\s+(.+)$", normalized)
+        if query_match:
+            query_prefix = query_match.group(1).strip()
+            query_target = query_match.group(3).strip()
+            if chosen_action == "query" or any(
+                query_prefix.startswith(prefix) for prefix in QUERY_PREFIXES
+            ):
+                target_tokens = query_target.split()
+                while target_tokens and target_tokens[0] in {"the", "a", "an", "my"}:
+                    target_tokens.pop(0)
+                query_target = " ".join(target_tokens)
+                return ParsedUtterance(
+                    action="query",
+                    action_phrase=query_prefix,
+                    target_phrase=query_target,
+                    area_hint=None,
+                )
 
         # Remove leading determiners from the extracted target phrase.
         target_tokens = target.split()
@@ -117,15 +132,18 @@ class FuzzyMatcher:
 
         area_hint = None
         # Parse location qualifiers using word boundaries to avoid splitting inside words
-        # (e.g., "great" must not match "at").
-        qualifier_match = re.search(r"\b(in|at|on)\b\s+(.+)$", target)
-        if qualifier_match:
-            before = target[: qualifier_match.start()].strip()
-            after = qualifier_match.group(2).strip()
-            if before and after:
-                area_tokens = after.split()
-                area_hint = area_tokens[0] if area_tokens and area_tokens[0] not in {"the", "a", "an", "my"} else None
-                target = before
+        # (e.g., "great" must not match "at"). Only do this for non-query
+        # utterances; for query-style phrases, trailing `on/in/at/for ...` often
+        # belongs to the semantic target instead of an area.
+        if chosen_action != "query":
+            qualifier_match = re.search(r"\b(in|at|on)\b\s+(.+)$", target)
+            if qualifier_match:
+                before = target[: qualifier_match.start()].strip()
+                after = qualifier_match.group(2).strip()
+                if before and after:
+                    area_tokens = after.split()
+                    area_hint = area_tokens[0] if area_tokens and area_tokens[0] not in {"the", "a", "an", "my"} else None
+                    target = before
 
         return ParsedUtterance(
             action=chosen_action,

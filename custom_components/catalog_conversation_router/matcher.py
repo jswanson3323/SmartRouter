@@ -604,6 +604,19 @@ class FuzzyMatcher:
         return len(name_tokens) >= 1
 
 
+    def _strip_leading_polite_prefix(self, text: str) -> str:
+        """Remove polite filler at the front of an utterance."""
+        normalized = normalize_text(text)
+        while True:
+            updated = re.sub(
+                r"^(?:pretty please|please|will you|would you|could you|can you|kindly|hey|hey assistant)\s+",
+                "",
+                normalized,
+            )
+            if updated == normalized:
+                return normalized.strip()
+            normalized = updated.strip()
+
     def _domain_hint_match(
         self,
         utter_tokens: list[str],

@@ -179,6 +179,10 @@ class ResolutionTrace:
     top_fuzzy_candidates: list[dict[str, Any]] = field(default_factory=list)
     chosen_canonical_phrase: str | None = None
     assist_pipeline_input: str | None = None
+    matched_sample_phrase_raw: str | None = None
+    matched_sample_phrase_normalized_for_scoring: str | None = None
+    rendered_from_pattern: bool | None = None
+    rendered_slots: dict[str, str] | None = None
     llm_translation_summary: dict[str, Any] | None = None
     final_executor: str | None = None
     catalog_revision: str | None = None

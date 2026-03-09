@@ -2,7 +2,6 @@
 
 
 from __future__ import annotations
-import re
 
 import logging
 from typing import Any
@@ -11,6 +10,8 @@ from .catalog import CatalogManager
 from .llm_adapter import LLMAdapter
 from .matcher import FuzzyMatcher
 from .models import ResolutionPath, ResolutionTrace, RouterConfig, RouterResult
+from .phrase_renderer import render_conversation_pattern
+from .phonetics import normalize_text
 from .safety import validate_fuzzy_execution
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,7 +88,29 @@ class AgentRouter:
 
             if decision.allowed:
                 trace.chosen_canonical_phrase = match_result.best.canonical_phrase
-                assist_input = self._build_assist_pipeline_input(text, match_result.best)
+                candidate_detail = match_result.best.detail or {}
+                trace.matched_sample_phrase_raw = candidate_detail.get("matched_sample_phrase_raw")
+                trace.matched_sample_phrase_normalized_for_scoring = candidate_detail.get(
+                    "matched_sample_phrase_normalized_for_scoring"
+                )
+
+                assist_input = match_result.best.canonical_phrase
+                trace.rendered_from_pattern = False
+                trace.rendered_slots = {}
+
+                if match_result.best.candidate_type.value == "conversation_target":
+                    matched_pattern = (
+                        trace.matched_sample_phrase_raw
+                        or match_result.best.canonical_phrase
+                    )
+                    rendered = render_conversation_pattern(
+                        original_utterance=text,
+                        pattern=matched_pattern,
+                    )
+                    assist_input = rendered.text or normalize_text(text)
+                    trace.rendered_from_pattern = rendered.rendered_from_pattern
+                    trace.rendered_slots = rendered.slots
+
                 trace.assist_pipeline_input = assist_input
                 if not dry_run:
                     fuzzy_outcome = await self._agent_adapter.async_process(
@@ -133,6 +156,8 @@ class AgentRouter:
             if translation.valid and translation.canonical_text:
                 trace.chosen_canonical_phrase = translation.canonical_text
                 trace.assist_pipeline_input = translation.canonical_text
+                trace.rendered_from_pattern = False
+                trace.rendered_slots = {}
                 if not dry_run:
                     translated_outcome = await self._agent_adapter.async_process(
                         agent_id=self._config.local_agent_id,
@@ -172,6 +197,8 @@ class AgentRouter:
 
         if exact.success:
             trace.assist_pipeline_input = text
+            trace.rendered_from_pattern = False
+            trace.rendered_slots = {}
             trace.selected_path = ResolutionPath.EXACT_LOCAL
             trace.final_executor = "local"
             return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
@@ -195,60 +222,6 @@ class AgentRouter:
         trace.selected_path = ResolutionPath.FAILED
         trace.final_executor = "none"
         return RouterResult(path=ResolutionPath.FAILED, outcome=exact, trace=trace)
-
-    def _build_assist_pipeline_input(self, original_text: str, candidate) -> str:
-        """Build the concrete text sent to the local Assist pipeline."""
-        if candidate.candidate_type.value != "conversation_target":
-            return candidate.canonical_phrase
-
-        cleaned_original = self._strip_leading_polite_prefix(original_text)
-        raw_phrase = str(candidate.detail.get("matched_sample_phrase_raw") or "")
-
-        if "timer" in raw_phrase and "{when}" in raw_phrase:
-            if "{name}" in raw_phrase:
-                match = re.search(
-                    r"\b(set|start|create|begin)\b\s+(?:a|an\s+)?(.+?)\s+timer\s+(?:for|in|at)\s+(.+)$",
-                    cleaned_original,
-                )
-                if match:
-                    verb = match.group(1)
-                    name = match.group(2).strip()
-                    when = match.group(3).strip()
-                    article = "an" if name[:1].lower() in {"a", "e", "i", "o", "u"} else "a"
-                    return f"{verb} {article} {name} timer for {when}"
-
-            match = re.search(
-                r"\b(set|start|create|begin)\b\s+(?:a|an\s+)?timer\s+(?:for|in|at)\s+(.+)$",
-                cleaned_original,
-            )
-            if match:
-                verb = match.group(1)
-                when = match.group(2).strip()
-                return f"{verb} a timer for {when}"
-
-        if raw_phrase and all(ch not in raw_phrase for ch in "{}[]()"):
-            return self._strip_leading_polite_prefix(raw_phrase)
-
-        return cleaned_original
-
-    def _strip_leading_polite_prefix(self, text: str) -> str:
-        """Normalize and remove polite filler from the start of an utterance."""
-        try:
-            from .phonetics import normalize_text
-        except Exception:
-            normalized = text.lower().strip()
-        else:
-            normalized = normalize_text(text)
-
-        while True:
-            updated = re.sub(
-                r"^(?:pretty please|please|will you|would you|could you|can you|kindly|hey|hey assistant)\s+",
-                "",
-                normalized,
-            )
-            if updated == normalized:
-                return normalized.strip()
-            normalized = updated.strip()
 
     def _resolve_origin_area(
         self,

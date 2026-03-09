@@ -63,17 +63,18 @@ class _MatchResult:
         self.matched = matched
         self.inferred_action = "turn_on"
         self.normalized_utterance = "turn on kitchen line"
+        self.effective_area_hint = None
 
 
 class _Candidate:
-    def __init__(self, phrase, score=0.91):
+    def __init__(self, phrase, score=0.91, candidate_type=CandidateType.ENTITY_COMMAND, detail=None):
         self.candidate_id = "light.kitchen"
-        self.candidate_type = CandidateType.ENTITY_COMMAND
+        self.candidate_type = candidate_type
         self.canonical_phrase = phrase
         self.score = score
         self.action = "turn_on"
         self.target_name = "kitchen light"
-        self.detail = {}
+        self.detail = detail or {}
 
 
 class _Translation:
@@ -120,6 +121,7 @@ def test_exact_local_success() -> None:
         matcher=_FakeMatcher(_MatchResult()),
         agent_adapter=_FakeAgentAdapter([_outcome(True)]),
         llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=None,
     )
     result = asyncio.run(
         router.async_route(
@@ -140,6 +142,7 @@ def test_fuzzy_path_success() -> None:
         matcher=_FakeMatcher(match),
         agent_adapter=_FakeAgentAdapter([_outcome(False), _outcome(True)]),
         llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=None,
     )
     result = asyncio.run(
         router.async_route(
@@ -160,6 +163,7 @@ def test_llm_translated_local_success() -> None:
         matcher=_FakeMatcher(match),
         agent_adapter=_FakeAgentAdapter([_outcome(False), _outcome(True)]),
         llm_adapter=_FakeLLMAdapter(_Translation(True, "turn on kitchen light"), _outcome(True)),
+        hass=None,
     )
     result = asyncio.run(
         router.async_route(
@@ -180,6 +184,7 @@ def test_final_fallback_path() -> None:
         matcher=_FakeMatcher(match),
         agent_adapter=_FakeAgentAdapter([_outcome(False)]),
         llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True, "llm answer")),
+        hass=None,
     )
     result = asyncio.run(
         router.async_route(
@@ -190,3 +195,43 @@ def test_final_fallback_path() -> None:
         )
     )
     assert result.path.value == "llm_fallback"
+
+
+def test_conversation_pattern_is_rendered_for_assist_input() -> None:
+    pattern = "How much time is left on my {name} (alarm | timer | reminder)"
+    match = _MatchResult(
+        best=_Candidate(
+            pattern,
+            candidate_type=CandidateType.CONVERSATION_TARGET,
+            detail={
+                "matched_sample_phrase_raw": pattern,
+                "matched_sample_phrase_normalized_for_scoring": "how much time is left on my timer",
+            },
+        ),
+        top=[
+            _Candidate(
+                pattern,
+                candidate_type=CandidateType.CONVERSATION_TARGET,
+                detail={"matched_sample_phrase_raw": pattern},
+            )
+        ],
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(True)]),
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="How much time is left on the test timer?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+    assert result.path.value == "fuzzy_local"
+    assert result.trace.chosen_canonical_phrase == pattern
+    assert result.trace.assist_pipeline_input == "how much time is left on my test timer"

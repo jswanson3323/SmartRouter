@@ -290,21 +290,25 @@ class FuzzyMatcher:
                         )
                         score_detail["whole_target_similarity"] = min(score_detail["whole_target_similarity"], 0.25)
 
-                # Insert slot specificity bonus logic here
-                slot_specificity_bonus = self._conversation_slot_specificity_bonus(
+                pattern_bonus, matched_slots, total_slots = self._conversation_pattern_bonus(
                     utterance_normalized=normalized,
                     raw_phrase=phrase,
-                    scoring_phrase=scoring_phrase,
                 )
-                score_detail["slot_specificity_bonus"] = slot_specificity_bonus
-                if slot_specificity_bonus > 0:
+                score_detail["pattern_bonus"] = pattern_bonus
+                score_detail["pattern_matched_slots"] = float(matched_slots)
+                score_detail["pattern_total_slots"] = float(total_slots)
+                if pattern_bonus != 0:
                     score_detail["structure_similarity"] = min(
                         1.0,
-                        score_detail["structure_similarity"] + slot_specificity_bonus,
+                        score_detail["structure_similarity"] + pattern_bonus,
                     )
                     score_detail["token_similarity"] = min(
                         1.0,
-                        score_detail["token_similarity"] + (slot_specificity_bonus * 0.5),
+                        score_detail["token_similarity"] + max(0.0, pattern_bonus * 0.4),
+                    )
+                    score_detail["whole_target_similarity"] = min(
+                        1.0,
+                        score_detail["whole_target_similarity"] + max(0.0, pattern_bonus * 0.3),
                     )
 
                 phrase_score = self._weighted_score(score_detail)
@@ -366,21 +370,25 @@ class FuzzyMatcher:
                         0.35,
                     )
 
-            # Insert slot specificity bonus logic here for fallback block
-            slot_specificity_bonus = self._conversation_slot_specificity_bonus(
+            pattern_bonus, matched_slots, total_slots = self._conversation_pattern_bonus(
                 utterance_normalized=normalized,
                 raw_phrase=best_phrase_raw,
-                scoring_phrase=best_phrase_for_scoring,
             )
-            score_detail["slot_specificity_bonus"] = slot_specificity_bonus
-            if slot_specificity_bonus > 0:
+            score_detail["pattern_bonus"] = pattern_bonus
+            score_detail["pattern_matched_slots"] = float(matched_slots)
+            score_detail["pattern_total_slots"] = float(total_slots)
+            if pattern_bonus != 0:
                 score_detail["structure_similarity"] = min(
                     1.0,
-                    score_detail["structure_similarity"] + slot_specificity_bonus,
+                    score_detail["structure_similarity"] + pattern_bonus,
                 )
                 score_detail["token_similarity"] = min(
                     1.0,
-                    score_detail["token_similarity"] + (slot_specificity_bonus * 0.5),
+                    score_detail["token_similarity"] + max(0.0, pattern_bonus * 0.4),
+                )
+                score_detail["whole_target_similarity"] = min(
+                    1.0,
+                    score_detail["whole_target_similarity"] + max(0.0, pattern_bonus * 0.3),
                 )
 
             final_score = self._weighted_score(score_detail)
@@ -560,68 +568,96 @@ class FuzzyMatcher:
         return [token for token in tokens if token not in stopwords]
 
 
-    def _conversation_slot_specificity_bonus(
+
+
+    def _conversation_pattern_bonus(
         self,
         *,
         utterance_normalized: str,
         raw_phrase: str,
-        scoring_phrase: str,
-    ) -> float:
-        """Reward conversation phrases whose slot shape matches the utterance.
+    ) -> tuple[float, int, int]:
+        """Reward conversation patterns that match fixed tokens and satisfy slots.
 
-        This helps more specific sentence patterns win over simpler generic ones.
-        For example:
-        - `set [a] timer for {when}`
-        - `(set|start|create|begin) [a | an] {name} timer for {when}`
-
-        When the utterance is `set a test timer for five minutes`, the second
-        pattern should win because the utterance clearly contains both a timer
-        name and a time expression.
+        This is grammar-aware and generic. It does not special-case timers,
+        reminders, alarms, or any other single intent family.
         """
-        bonus = 0.0
-        raw_lower = raw_phrase.lower()
-        normalized_utterance = normalize_text(utterance_normalized)
+        utterance_tokens = tokenize(self._strip_leading_polite_prefix(utterance_normalized))
+        total_slots = len(re.findall(r"\{[^}]+\}", raw_phrase))
+        if total_slots == 0:
+            return 0.0, 0, 0
 
-        has_name_slot = "{name}" in raw_lower
-        has_when_slot = "{when}" in raw_lower
-        has_amount_slot = "{amount}" in raw_lower
+        matched_slots = self._count_supported_slots(utterance_tokens, raw_phrase)
 
-        if has_name_slot and self._utterance_implies_named_timer(normalized_utterance):
-            bonus += 0.18
-        elif not has_name_slot and self._utterance_implies_named_timer(normalized_utterance):
-            if "timer" in scoring_phrase:
-                bonus -= 0.08
+        # Reward patterns that can satisfy more slots. This naturally makes more
+        # specific patterns win when the utterance contains enough information.
+        bonus = 0.08 * matched_slots
+        if matched_slots == total_slots and total_slots > 1:
+            bonus += 0.04 * (total_slots - 1)
+        elif matched_slots < total_slots:
+            bonus -= 0.02 * (total_slots - matched_slots)
 
-        if has_when_slot and re.search(r"\b(for|in|at)\b\s+.+$", normalized_utterance):
-            bonus += 0.12
+        return max(-0.08, min(0.25, bonus)), matched_slots, total_slots
 
-        if has_amount_slot and re.search(r"\bto\b\s+.+$", normalized_utterance):
-            bonus += 0.08
+    def _count_supported_slots(self, utterance_tokens: list[str], raw_phrase: str) -> int:
+        """Count how many slots in a conversation pattern are supported.
 
-        return max(-0.1, min(0.35, bonus))
-
-    def _utterance_implies_named_timer(self, normalized_utterance: str) -> bool:
-        """Return True when utterance looks like it names a timer.
-
-        Examples that should return True:
-        - `set a test timer for five minutes`
-        - `start laundry timer for 10 minutes`
-
-        Examples that should return False:
-        - `set a timer for five minutes`
-        - `start timer for 10 minutes`
+        A slot is considered supported when the utterance contains token span(s)
+        between the nearest fixed-token anchors around that slot.
         """
-        match = re.search(r"\b(?:set|start|create|begin)\b\s+(?:a|an\s+)?(.+?)\s+timer\b", normalized_utterance)
-        if not match:
-            return False
+        matches = list(re.finditer(r"\{[^}]+\}", raw_phrase))
+        if not matches:
+            return 0
 
-        name_part = normalize_text(match.group(1))
-        name_tokens = [
-            token
-            for token in tokenize(name_part)
-            if token not in {"a", "an", "the", "my", "timer", "for", "in", "at"}
-        ]
-        return len(name_tokens) >= 1
+        supported = 0
+        for match in matches:
+            prefix_text = raw_phrase[: match.start()]
+            suffix_text = raw_phrase[match.end() :]
+            prefix_tokens = tokenize(self._normalize_conversation_phrase_for_scoring(prefix_text))
+            suffix_tokens = tokenize(self._normalize_conversation_phrase_for_scoring(suffix_text))
+            if self._slot_span_supported(utterance_tokens, prefix_tokens, suffix_tokens):
+                supported += 1
+        return supported
+
+    def _slot_span_supported(
+        self,
+        utterance_tokens: list[str],
+        prefix_tokens: list[str],
+        suffix_tokens: list[str],
+    ) -> bool:
+        """Return True when utterance has content where the slot should be."""
+        prefix_span = self._find_subsequence_span(utterance_tokens, prefix_tokens, 0)
+        prefix_end = prefix_span[1] if prefix_span else 0
+
+        if suffix_tokens:
+            suffix_span = self._find_subsequence_span(utterance_tokens, suffix_tokens, prefix_end)
+            if not suffix_span:
+                return False
+            return suffix_span[0] > prefix_end
+
+        return prefix_end < len(utterance_tokens)
+
+    def _find_subsequence_span(
+        self,
+        utterance_tokens: list[str],
+        pattern_tokens: list[str],
+        start_index: int,
+    ) -> tuple[int, int] | None:
+        """Find the first ordered subsequence span for pattern tokens."""
+        if not pattern_tokens:
+            return (start_index, start_index)
+
+        first_index: int | None = None
+        current_index = start_index
+        for pattern_token in pattern_tokens:
+            while current_index < len(utterance_tokens) and utterance_tokens[current_index] != pattern_token:
+                current_index += 1
+            if current_index >= len(utterance_tokens):
+                return None
+            if first_index is None:
+                first_index = current_index
+            current_index += 1
+
+        return (first_index if first_index is not None else start_index, current_index)
 
 
     def _strip_leading_polite_prefix(self, text: str) -> str:

@@ -24,6 +24,8 @@ class AgentAdapter:
         language: str,
         conversation_id: str | None,
         context: Any,
+        device_id: str | None = None,
+        satellite_id: str | None = None,
     ) -> LocalAgentOutcome:
         """Process text through a target agent."""
         resolved_agent_id = None if agent_id in {"homeassistant", "__default__", "default"} else agent_id
@@ -32,21 +34,29 @@ class AgentAdapter:
             from homeassistant.components import conversation
 
             _LOGGER.debug(
-                "LocalAgentAdapter.async_process text=%s configured_agent_id=%s resolved_agent_id=%s language=%s conversation_id=%s",
+                "LocalAgentAdapter.async_process text=%s configured_agent_id=%s resolved_agent_id=%s language=%s conversation_id=%s device_id=%s satellite_id=%s",
                 text,
                 agent_id,
                 resolved_agent_id,
                 language,
                 conversation_id,
+                device_id,
+                satellite_id,
             )
-            response = await conversation.async_converse(
-                hass=self._hass,
-                text=text,
-                conversation_id=conversation_id,
-                context=context,
-                language=language,
-                agent_id=resolved_agent_id,
-            )
+            converse_kwargs = {
+                "hass": self._hass,
+                "text": text,
+                "conversation_id": conversation_id,
+                "context": context,
+                "language": language,
+                "agent_id": resolved_agent_id,
+            }
+            if device_id is not None:
+                converse_kwargs["device_id"] = device_id
+            if satellite_id is not None:
+                converse_kwargs["satellite_id"] = satellite_id
+
+            response = await conversation.async_converse(**converse_kwargs)
         except Exception as err:
             _LOGGER.warning("Agent call failed for %s: %s", agent_id, err)
             return LocalAgentOutcome(
@@ -65,9 +75,11 @@ class AgentAdapter:
         failure = None if success else self._classify_failure(response_text, error_code=error_code, response_type=response_type)
 
         _LOGGER.debug(
-            "LocalAgentAdapter result configured_agent_id=%s resolved_agent_id=%s response_type=%s error_code=%s processed_locally=%s success=%s response_text=%s",
+            "LocalAgentAdapter result configured_agent_id=%s resolved_agent_id=%s device_id=%s satellite_id=%s response_type=%s error_code=%s processed_locally=%s success=%s response_text=%s",
             agent_id,
             resolved_agent_id,
+            device_id,
+            satellite_id,
             response_type,
             error_code,
             processed_locally,

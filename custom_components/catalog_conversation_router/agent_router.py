@@ -119,6 +119,8 @@ class AgentRouter:
                         language=language,
                         conversation_id=conversation_id,
                         context=context,
+                        device_id=device_id,
+                        satellite_id=satellite_id,
                     )
                 else:
                     fuzzy_outcome = None
@@ -149,6 +151,8 @@ class AgentRouter:
                             language=language,
                             conversation_id=conversation_id,
                             context=context,
+                            device_id=device_id,
+                            satellite_id=satellite_id,
                         )
                     else:
                         fuzzy_outcome = None
@@ -195,6 +199,8 @@ class AgentRouter:
                         language=language,
                         conversation_id=conversation_id,
                         context=context,
+                        device_id=device_id,
+                        satellite_id=satellite_id,
                     )
                 else:
                     translated_outcome = None
@@ -215,6 +221,8 @@ class AgentRouter:
             language=language,
             conversation_id=conversation_id,
             context=context,
+            device_id=device_id,
+            satellite_id=satellite_id,
         )
         trace.exact_local_outcome = "success" if exact.success else "failed"
         trace.exact_local_response_text = exact.response_text

@@ -169,6 +169,7 @@ class FuzzyMatcher:
             entities=catalog.entity_targets,
             area_hint=effective_area_hint,
         )
+        inferred_domain = self._infer_domain_from_tokens(utter_tokens)
 
         scores: list[CandidateScore] = []
 
@@ -227,6 +228,23 @@ class FuzzyMatcher:
                 score_detail["structure_similarity"] = min(1.0, score_detail["structure_similarity"] + 0.25)
                 score_detail["phonetic_similarity"] = min(1.0, score_detail["phonetic_similarity"] + 0.10)
                 score_detail["area_scoped_domain_resolution"] = 1.0
+
+            area_preference_bonus = self._area_preference_bonus(
+                utter_tokens=utter_tokens,
+                inferred_domain=inferred_domain,
+                effective_area_hint=effective_area_hint,
+                entity=entity,
+            )
+            score_detail["area_preference_bonus"] = area_preference_bonus
+            if area_preference_bonus > 0:
+                score_detail["token_similarity"] = min(1.0, score_detail["token_similarity"] + area_preference_bonus)
+                score_detail["structure_similarity"] = min(1.0, score_detail["structure_similarity"] + area_preference_bonus)
+                score_detail["whole_target_similarity"] = min(1.0, score_detail["whole_target_similarity"] + (area_preference_bonus * 0.75))
+                score_detail["phonetic_similarity"] = min(1.0, score_detail["phonetic_similarity"] + (area_preference_bonus * 0.5))
+            elif area_preference_bonus < 0:
+                score_detail["token_similarity"] = max(0.0, score_detail["token_similarity"] + area_preference_bonus)
+                score_detail["structure_similarity"] = max(0.0, score_detail["structure_similarity"] + area_preference_bonus)
+                score_detail["whole_target_similarity"] = max(0.0, score_detail["whole_target_similarity"] + (area_preference_bonus * 0.75))
 
             final_score = self._weighted_score(score_detail)
             if area_scoped_domain_entity_id and entity.entity_id == area_scoped_domain_entity_id:
@@ -786,6 +804,50 @@ class FuzzyMatcher:
             if utter_set & terms:
                 return domain
         return None
+
+    def _is_generic_domain_request(self, utter_tokens: list[str], inferred_domain: str | None) -> bool:
+        """Return True for generic commands like `turn on the light`."""
+        if not inferred_domain:
+            return False
+        semantic_tokens = self._semantic_tokens(utter_tokens)
+        if not semantic_tokens:
+            return False
+        domain_terms = DOMAIN_HINT_MAP.get(inferred_domain, set())
+        return all(token in domain_terms for token in semantic_tokens)
+
+    def _area_preference_bonus(
+        self,
+        *,
+        utter_tokens: list[str],
+        inferred_domain: str | None,
+        effective_area_hint: str | None,
+        entity: EntityTarget,
+    ) -> float:
+        """Prefer same-area entities for generic domain requests.
+
+        This is intentionally generic. It applies to commands such as:
+        - turn on the light
+        - turn off the fan
+        - turn on the tv
+
+        when the origin area is known and the utterance does not otherwise
+        uniquely identify a target.
+        """
+        if not effective_area_hint or not entity.area or not inferred_domain:
+            return 0.0
+        if entity.domain != inferred_domain:
+            return 0.0
+        if not self._is_generic_domain_request(utter_tokens, inferred_domain):
+            return 0.0
+
+        hint_tokens = set(tokenize(effective_area_hint))
+        entity_area_tokens = set(tokenize(normalize_text(entity.area)))
+        if not hint_tokens or not entity_area_tokens:
+            return 0.0
+
+        if hint_tokens <= entity_area_tokens:
+            return 0.35
+        return -0.12
 
     def _set_similarity(self, left: set[str], right: set[str]) -> float:
         if not left or not right:

@@ -60,30 +60,7 @@ class AgentRouter:
             effective_area_hint=match_result.effective_area_hint,
         )
 
-        # 1) exact local attempt
-        exact = await self._agent_adapter.async_process(
-            agent_id=self._config.local_agent_id,
-            text=text,
-            language=language,
-            conversation_id=conversation_id,
-            context=context,
-        )
-        trace.exact_local_outcome = "success" if exact.success else "failed"
-        trace.exact_local_response_text = exact.response_text
-        trace.exact_local_response_type = exact.response_type
-        trace.exact_local_error_code = exact.error_code
-        trace.exact_local_processed_locally = exact.processed_locally
-        trace.failure_category = (
-            exact.failure_category.value if exact.failure_category is not None else None
-        )
-
-        if exact.success:
-            trace.assist_pipeline_input = text
-            trace.selected_path = ResolutionPath.EXACT_LOCAL
-            trace.final_executor = "local"
-            return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
-
-        # 2) fuzzy attempt
+        # 1) fuzzy attempt
         if self._config.fuzzy_enabled and match_result.best is not None:
             trace.top_fuzzy_candidates = [
                 {
@@ -134,7 +111,7 @@ class AgentRouter:
             else:
                 _LOGGER.debug("Fuzzy candidate rejected: %s", decision.reason)
 
-        # 3) LLM translation to local
+        # 2) LLM translation to local
         if self._config.llm_translate_enabled:
             translation = await self._llm_adapter.async_translate_for_local(
                 llm_agent_id=self._config.llm_agent_id,
@@ -175,6 +152,29 @@ class AgentRouter:
                         outcome=translated_outcome,
                         trace=trace,
                     )
+
+        # 3) raw local attempt
+        exact = await self._agent_adapter.async_process(
+            agent_id=self._config.local_agent_id,
+            text=text,
+            language=language,
+            conversation_id=conversation_id,
+            context=context,
+        )
+        trace.exact_local_outcome = "success" if exact.success else "failed"
+        trace.exact_local_response_text = exact.response_text
+        trace.exact_local_response_type = exact.response_type
+        trace.exact_local_error_code = exact.error_code
+        trace.exact_local_processed_locally = exact.processed_locally
+        trace.failure_category = (
+            exact.failure_category.value if exact.failure_category is not None else None
+        )
+
+        if exact.success:
+            trace.assist_pipeline_input = text
+            trace.selected_path = ResolutionPath.EXACT_LOCAL
+            trace.final_executor = "local"
+            return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
 
         # 4) final direct llm fallback
         if self._config.llm_fallback_enabled:

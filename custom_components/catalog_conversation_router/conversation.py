@@ -64,17 +64,42 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
 
         if result.outcome.response is not None:
             response = result.outcome.response
+            processed_locally = result.outcome.processed_locally is True
 
-            # Preserve downstream local-processing metadata only when the
-            # request was actually handled by the local assistant. Do not mark
-            # LLM-handled responses as locally processed.
-            if result.outcome.processed_locally is True:
-                try:
-                    setattr(response, "processed_locally", True)
-                except Exception:
-                    pass
+            # If the downstream local agent already returned a full ConversationResult,
+            # preserve it and only try to annotate processed_locally when supported.
+            if hasattr(response, "response") and hasattr(response, "conversation_id"):
+                if processed_locally:
+                    try:
+                        setattr(response, "processed_locally", True)
+                    except Exception:
+                        pass
+                return response
 
-            return response
+            # Otherwise wrap the downstream response object so the outer pipeline keeps
+            # the native response payload while also preserving processed_locally.
+            if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
+                return response
+
+            try:
+                return ConversationResult(
+                    response=response,
+                    conversation_id=user_input.conversation_id,
+                    continue_conversation=False,
+                    processed_locally=processed_locally,
+                )
+            except TypeError:
+                wrapped = ConversationResult(
+                    response=response,
+                    conversation_id=user_input.conversation_id,
+                    continue_conversation=False,
+                )
+                if processed_locally:
+                    try:
+                        setattr(wrapped, "processed_locally", True)
+                    except Exception:
+                        pass
+                return wrapped
 
         # Fallback-only edge case where adapter failed to return a native response object.
         if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover

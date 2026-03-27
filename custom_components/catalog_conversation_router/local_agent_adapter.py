@@ -60,6 +60,8 @@ class AgentAdapter:
             _LOGGER.warning("FULL LOCAL RESPONSE OBJECT: %r", response)
             _LOGGER.warning("LOCAL RESPONSE TYPE OBJECT: %r", type(response))
             _LOGGER.warning("LOCAL RESPONSE __dict__: %s", getattr(response, "__dict__", None))
+            _LOGGER.warning("LOCAL RESPONSE DIR: %s", dir(response))
+            _LOGGER.warning("LOCAL RESPONSE processed_locally attr: %s", getattr(response, "processed_locally", None))
         except Exception as err:
             _LOGGER.warning("Agent call failed for %s: %s", agent_id, err)
             return LocalAgentOutcome(

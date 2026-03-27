@@ -50,6 +50,7 @@ class AgentRouter:
         satellite_id: str | None = None,
     ) -> RouterResult:
         """Run deterministic routing pipeline with bounded attempts."""
+        _LOGGER.warning("ROUTER START: text=%r, device_id=%r, satellite_id=%r", text, device_id, satellite_id)
         catalog = self._catalog.get_catalog()
         resolved_origin_area = origin_area or self._resolve_origin_area(device_id=device_id, satellite_id=satellite_id, context=context)
         match_result = self._matcher.match(text, catalog, origin_area=resolved_origin_area)
@@ -112,6 +113,7 @@ class AgentRouter:
                     trace.rendered_slots = rendered.slots
 
                 trace.assist_pipeline_input = assist_input
+                _LOGGER.warning("ROUTER PATH: FUZZY_LOCAL → calling adapter with input=%r", assist_input)
                 if not dry_run:
                     fuzzy_outcome = await self._agent_adapter.async_process(
                         agent_id=self._config.local_agent_id,
@@ -144,6 +146,7 @@ class AgentRouter:
                     trace.assist_pipeline_input = match_result.best.canonical_phrase
                     trace.rendered_from_pattern = False
                     trace.rendered_slots = {}
+                    _LOGGER.warning("ROUTER PATH: FUZZY_LOCAL (forced area) → calling adapter with input=%r", match_result.best.canonical_phrase)
                     if not dry_run:
                         fuzzy_outcome = await self._agent_adapter.async_process(
                             agent_id=self._config.local_agent_id,
@@ -192,6 +195,7 @@ class AgentRouter:
                 trace.assist_pipeline_input = translation.canonical_text
                 trace.rendered_from_pattern = False
                 trace.rendered_slots = {}
+                _LOGGER.warning("ROUTER PATH: LLM_TRANSLATED_LOCAL → calling adapter with input=%r", translation.canonical_text)
                 if not dry_run:
                     translated_outcome = await self._agent_adapter.async_process(
                         agent_id=self._config.local_agent_id,
@@ -215,6 +219,7 @@ class AgentRouter:
                     )
 
         # 3) raw local attempt
+        _LOGGER.warning("ROUTER PATH: EXACT_LOCAL → calling adapter with input=%r", text)
         exact = await self._agent_adapter.async_process(
             agent_id=self._config.local_agent_id,
             text=text,

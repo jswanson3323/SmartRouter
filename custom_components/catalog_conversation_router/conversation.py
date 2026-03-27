@@ -49,6 +49,14 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
 
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
         """Process a conversation input."""
+        _LOGGER.warning(
+            "CONVERSATION ENTRY: text=%r language=%r conversation_id=%r device_id=%r satellite_id=%r",
+            user_input.text,
+            user_input.language,
+            user_input.conversation_id,
+            getattr(user_input, "device_id", None),
+            getattr(user_input, "satellite_id", None),
+        )
         result: RouterResult = await self._router.async_route(
             text=user_input.text,
             language=user_input.language or self._language,

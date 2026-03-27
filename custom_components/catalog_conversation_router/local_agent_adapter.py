@@ -57,6 +57,9 @@ class AgentAdapter:
                 converse_kwargs["satellite_id"] = satellite_id
 
             response = await conversation.async_converse(**converse_kwargs)
+            _LOGGER.warning("FULL LOCAL RESPONSE OBJECT: %r", response)
+            _LOGGER.warning("LOCAL RESPONSE TYPE OBJECT: %r", type(response))
+            _LOGGER.warning("LOCAL RESPONSE __dict__: %s", getattr(response, "__dict__", None))
         except Exception as err:
             _LOGGER.warning("Agent call failed for %s: %s", agent_id, err)
             return LocalAgentOutcome(

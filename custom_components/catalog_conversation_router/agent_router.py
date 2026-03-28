@@ -245,7 +245,7 @@ class AgentRouter:
             exact.failure_category.value if exact.failure_category is not None else None
         )
 
-        if exact.success:
+        if exact.success and exact.processed_locally is True:
             _LOGGER.warning("ROUTER DECISION: EXACT_LOCAL")
             trace.assist_pipeline_input = text
             trace.rendered_from_pattern = False
@@ -253,6 +253,14 @@ class AgentRouter:
             trace.selected_path = ResolutionPath.EXACT_LOCAL
             trace.final_executor = "local"
             return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
+
+        if exact.success and exact.processed_locally is not True:
+            _LOGGER.warning(
+                "EXACT LOCAL rejected: success=%s processed_locally=%s response=%r",
+                exact.success,
+                exact.processed_locally,
+                exact.response_text,
+            )
 
         # 4) final direct llm fallback
         if self._config.llm_fallback_enabled:

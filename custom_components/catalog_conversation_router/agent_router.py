@@ -51,9 +51,11 @@ class AgentRouter:
     ) -> RouterResult:
         """Run deterministic routing pipeline with bounded attempts."""
         _LOGGER.debug("ROUTER START: text=%r, device_id=%r, satellite_id=%r", text, device_id, satellite_id)
+        _LOGGER.warning("ROUTER INPUT: %r", text)
         catalog = self._catalog.get_catalog()
         resolved_origin_area = origin_area or self._resolve_origin_area(device_id=device_id, satellite_id=satellite_id, context=context)
         match_result = self._matcher.match(text, catalog, origin_area=resolved_origin_area)
+        _LOGGER.warning("FUZZY MATCH: best=%s score=%s", getattr(match_result.best, "canonical_phrase", None), getattr(match_result.best, "score", None))
         trace = ResolutionTrace(
             original_utterance=text,
             normalized_utterance=match_result.normalized_utterance,
@@ -128,6 +130,7 @@ class AgentRouter:
                     fuzzy_outcome = None
 
                 if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
+                    _LOGGER.warning("ROUTER DECISION: FUZZY_LOCAL")
                     trace.selected_path = ResolutionPath.FUZZY_LOCAL
                     trace.final_executor = "local"
                     return RouterResult(
@@ -161,6 +164,7 @@ class AgentRouter:
                         fuzzy_outcome = None
 
                     if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
+                        _LOGGER.warning("ROUTER DECISION: FUZZY_LOCAL")
                         trace.selected_path = ResolutionPath.FUZZY_LOCAL
                         trace.final_executor = "local"
                         return RouterResult(
@@ -182,6 +186,7 @@ class AgentRouter:
                 context=context,
                 origin_area=resolved_origin_area,
             )
+            _LOGGER.warning("LLM TRANSLATION: valid=%s canonical=%s mode=%s", translation.valid, translation.canonical_text, translation.mode)
             trace.llm_translation_summary = {
                 "mode": translation.mode,
                 "confidence": translation.confidence,
@@ -210,6 +215,7 @@ class AgentRouter:
                     translated_outcome = None
 
                 if dry_run or (translated_outcome is not None and translated_outcome.success):
+                    _LOGGER.warning("ROUTER DECISION: LLM_TRANSLATED_LOCAL")
                     trace.selected_path = ResolutionPath.LLM_TRANSLATED_LOCAL
                     trace.final_executor = "local"
                     return RouterResult(
@@ -229,6 +235,7 @@ class AgentRouter:
             device_id=device_id,
             satellite_id=satellite_id,
         )
+        _LOGGER.warning("EXACT LOCAL: success=%s response=%r processed_locally=%s", exact.success, exact.response_text, exact.processed_locally)
         trace.exact_local_outcome = "success" if exact.success else "failed"
         trace.exact_local_response_text = exact.response_text
         trace.exact_local_response_type = exact.response_type
@@ -239,6 +246,7 @@ class AgentRouter:
         )
 
         if exact.success:
+            _LOGGER.warning("ROUTER DECISION: EXACT_LOCAL")
             trace.assist_pipeline_input = text
             trace.rendered_from_pattern = False
             trace.rendered_slots = {}
@@ -249,6 +257,7 @@ class AgentRouter:
         # 4) final direct llm fallback
         if self._config.llm_fallback_enabled:
             if not dry_run:
+                _LOGGER.warning("ROUTER DECISION: LLM_FALLBACK (calling LLM)")
                 llm_outcome = await self._llm_adapter.async_final_fallback(
                     llm_agent_id=self._config.llm_agent_id,
                     utterance=text,
@@ -258,6 +267,7 @@ class AgentRouter:
                 )
             else:
                 llm_outcome = exact
+            _LOGGER.warning("LLM FALLBACK RESPONSE: %r", getattr(llm_outcome, "response_text", None))
             trace.selected_path = ResolutionPath.LLM_FALLBACK
             trace.final_executor = "llm"
             return RouterResult(path=ResolutionPath.LLM_FALLBACK, outcome=llm_outcome, trace=trace)

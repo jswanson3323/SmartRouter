@@ -44,7 +44,7 @@ class LLMAdapter:
             agent_id=llm_agent_id,
             text=prompt,
             language=language,
-            conversation_id=conversation_id,
+            conversation_id=None,
             context=context,
         )
 
@@ -77,13 +77,41 @@ class LLMAdapter:
         context: Any,
     ):
         """Final direct LLM handling."""
-        return await self._agent_adapter.async_process(
+        outcome = await self._agent_adapter.async_process(
             agent_id=llm_agent_id,
             text=utterance,
             language=language,
             conversation_id=conversation_id,
             context=context,
         )
+
+        if outcome.response_text:
+            outcome.response_text = self._strip_leading_router_json(
+                outcome.response_text
+            )
+
+        return outcome
+
+    def _strip_leading_router_json(self, text: str | None) -> str | None:
+        """Remove accidental leading router JSON from fallback LLM speech."""
+        if not text:
+            return text
+
+        stripped = text.lstrip()
+        match = JSON_BLOCK_RE.match(stripped)
+        if not match:
+            return text
+
+        try:
+            payload = json.loads(match.group(0))
+        except Exception:
+            return text
+
+        if isinstance(payload, dict) and "mode" in payload and "canonical_text" in payload:
+            remainder = stripped[match.end():].lstrip(" \n,:-")
+            return remainder or text
+
+        return text
 
     def _build_translation_prompt(
         self,

@@ -247,7 +247,7 @@ class EntityCatalogSource:
                 )
             )
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Entity catalog build complete: entity_count=%s",
             len(targets),
         )
@@ -382,7 +382,7 @@ class ConversationTargetSource:
             existing.phonetic_tokens = merged_phonetics
 
         final_targets = list(deduped.values())
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Conversation target catalog build complete: target_count=%s raw_count=%s",
             len(final_targets),
             len(targets),
@@ -394,7 +394,7 @@ class ConversationTargetSource:
         targets: list[ConversationTarget] = []
         intent_domain = hass.data.get("intent_script")
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Intent script runtime discovery: domain_present=%s domain_type=%s",
             intent_domain is not None,
             type(intent_domain).__name__ if intent_domain is not None else "None",
@@ -409,7 +409,7 @@ class ConversationTargetSource:
                 candidate = intent_domain.get(key)
                 if isinstance(candidate, dict):
                     scripts = candidate
-                    _LOGGER.warning(
+                    _LOGGER.debug(
                         "Intent script runtime discovery: using dict key=%s count=%s",
                         key,
                         len(candidate),
@@ -420,7 +420,7 @@ class ConversationTargetSource:
                 dict_like_values = any(isinstance(v, (dict, str)) for v in intent_domain.values())
                 if dict_like_values:
                     scripts = intent_domain
-                    _LOGGER.warning(
+                    _LOGGER.debug(
                         "Intent script runtime discovery: using top-level mapping count=%s",
                         len(scripts),
                     )
@@ -435,7 +435,7 @@ class ConversationTargetSource:
             if built is not None:
                 targets.append(built)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Intent script runtime discovery complete: built_count=%s",
             len(targets),
         )
@@ -447,7 +447,7 @@ class ConversationTargetSource:
         config_path = Path(hass.config.path("intent_script.yaml"))
         data = _read_yaml_file(config_path)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Intent script YAML discovery: path=%s exists=%s loaded=%s",
             config_path,
             config_path.exists(),
@@ -461,7 +461,7 @@ class ConversationTargetSource:
             if built is not None:
                 targets.append(built)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Intent script YAML discovery complete: built_count=%s",
             len(targets),
         )
@@ -528,7 +528,7 @@ class ConversationTargetSource:
                     if built is not None:
                         targets.append(built)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Automation runtime discovery complete: automation_state_count=%s trigger_attr_count=%s built_count=%s",
             len(automation_states),
             attr_trigger_count,
@@ -542,7 +542,7 @@ class ConversationTargetSource:
         automations_path = Path(hass.config.path("automations.yaml"))
         data = _read_yaml_file(automations_path)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Automation YAML discovery: path=%s exists=%s loaded=%s",
             automations_path,
             automations_path.exists(),
@@ -588,7 +588,7 @@ class ConversationTargetSource:
                     direct_count += 1
                     targets.append(built)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Automation YAML discovery complete: automation_count=%s direct_built=%s blueprint_built=%s total_built=%s",
             len(data),
             direct_count,
@@ -617,7 +617,7 @@ class ConversationTargetSource:
         resolved_path = Path(hass.config.path("blueprints", "automation", blueprint_path))
         blueprint_data = _read_yaml_file(resolved_path)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Blueprint automation discovery: automation=%s path=%s exists=%s loaded=%s",
             display_name,
             resolved_path,
@@ -639,7 +639,7 @@ class ConversationTargetSource:
             if built is not None:
                 built_targets.append(built)
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Blueprint automation discovery complete: automation=%s built_count=%s",
             display_name,
             len(built_targets),
@@ -736,7 +736,7 @@ class ManualConversationTargetSource:
                 )
             )
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Manual conversation target merge complete: built_count=%s",
             len(output),
         )

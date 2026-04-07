@@ -30,8 +30,14 @@ STOP_WORDS = {
 }
 
 
-def normalize_text(text: str) -> str:
+def normalize_text(text: object) -> str:
     """Normalize text for deterministic matching."""
+    if text is None:
+        return ""
+
+    if not isinstance(text, str):
+        text = str(text)
+
     value = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     value = value.lower().strip()
     value = re.sub(r"[^a-z0-9\s]", " ", value)

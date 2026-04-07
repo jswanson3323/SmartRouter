@@ -223,7 +223,9 @@ class EntityCatalogSource:
 
             tokens = tokenize(name)
             for alias in aliases:
-                tokens.extend(tokenize(alias))
+                if alias is None:
+                    continue
+                tokens.extend(tokenize(str(alias)))
             if area_name:
                 tokens.extend(tokenize(area_name))
             if device_name:

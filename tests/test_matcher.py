@@ -17,6 +17,7 @@ def _catalog() -> Catalog:
         aliases=["kitchen lamp"],
         domain="light",
         area="Kitchen",
+        super_area=None,
         floor=None,
         device_name="Kitchen Lights",
         exposed=True,
@@ -67,6 +68,7 @@ def _room_catalog() -> Catalog:
                 aliases=[],
                 domain="light",
                 area="Office",
+                super_area=None,
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -81,6 +83,7 @@ def _room_catalog() -> Catalog:
                 aliases=[],
                 domain="fan",
                 area="Office",
+                super_area=None,
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -95,6 +98,7 @@ def _room_catalog() -> Catalog:
                 aliases=["break room fan"],
                 domain="fan",
                 area="Great Room",
+                super_area=None,
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -137,6 +141,7 @@ def test_ambiguity_rejection() -> None:
             aliases=[],
             domain="light",
             area="Kitchen",
+            super_area=None,
             floor=None,
             device_name=None,
             exposed=True,
@@ -237,6 +242,7 @@ def test_area_scoped_generic_light_resolves_to_master_bedroom() -> None:
                 aliases=[],
                 domain="light",
                 area="Master Bedroom",
+                super_area="Upstairs",
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -251,6 +257,7 @@ def test_area_scoped_generic_light_resolves_to_master_bedroom() -> None:
                 aliases=[],
                 domain="light",
                 area="Gym",
+                super_area="Downstairs",
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -286,6 +293,7 @@ def test_area_scoped_generic_ligh_typo_resolves_to_master_bedroom() -> None:
                 aliases=[],
                 domain="light",
                 area="Master Bedroom",
+                super_area="Upstairs",
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -300,6 +308,7 @@ def test_area_scoped_generic_ligh_typo_resolves_to_master_bedroom() -> None:
                 aliases=[],
                 domain="light",
                 area="Gym",
+                super_area="Downstairs",
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -317,3 +326,155 @@ def test_area_scoped_generic_ligh_typo_resolves_to_master_bedroom() -> None:
     assert result.best.canonical_phrase.lower() == "turn on master bedroom light"
     assert result.parsed_target_after_normalization == "light"
     assert result.matched is True
+
+
+def test_super_area_second_pass_resolves_when_area_has_no_match() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r5",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="light.hall_light",
+                name="Hall Light",
+                normalized_name="hall light",
+                aliases=[],
+                domain="light",
+                area="Hall",
+                super_area="Upstairs",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["hall", "light"],
+                phonetic_tokens=["H400", "L230"],
+            ),
+            EntityTarget(
+                entity_id="light.gym_light",
+                name="Gym Light",
+                normalized_name="gym light",
+                aliases=[],
+                domain="light",
+                area="Gym",
+                super_area="Downstairs",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["gym", "light"],
+                phonetic_tokens=["J500", "L230"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
+    result = matcher.match("turn on the light", catalog, origin_area="Master Bedroom")
+    assert result.best is not None
+    assert result.best.candidate_id == "light.hall_light"
+    assert result.best.canonical_phrase.lower() == "turn on hall light"
+    assert result.effective_super_area_hint == "Upstairs"
+    assert result.matched is True
+
+
+def test_area_match_beats_super_area_match() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r6",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="light.master_bedroom_light",
+                name="Master Bedroom Light",
+                normalized_name="master bedroom light",
+                aliases=[],
+                domain="light",
+                area="Master Bedroom",
+                super_area="Upstairs",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["master", "bedroom", "light"],
+                phonetic_tokens=["M236", "B365", "L230"],
+            ),
+            EntityTarget(
+                entity_id="light.hall_light",
+                name="Hall Light",
+                normalized_name="hall light",
+                aliases=[],
+                domain="light",
+                area="Hall",
+                super_area="Upstairs",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["hall", "light"],
+                phonetic_tokens=["H400", "L230"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
+    result = matcher.match("turn on the light", catalog, origin_area="Master Bedroom")
+    assert result.best is not None
+    assert result.best.candidate_id == "light.master_bedroom_light"
+    assert result.best.canonical_phrase.lower() == "turn on master bedroom light"
+
+
+def test_explicit_other_room_target_is_not_overridden_by_origin_area() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r7",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="fan.guest_room_fan",
+                name="Guest Room Fan",
+                normalized_name="guest room fan",
+                aliases=[],
+                domain="fan",
+                area="Guest Room",
+                super_area="Upstairs",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["guest", "room", "fan"],
+                phonetic_tokens=["G230", "R500", "F500"],
+            ),
+            EntityTarget(
+                entity_id="fan.gym_fan",
+                name="Gym Fan",
+                normalized_name="gym fan",
+                aliases=[],
+                domain="fan",
+                area="Gym",
+                super_area="Downstairs",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["gym", "fan"],
+                phonetic_tokens=["J500", "F500"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
+    result = matcher.match("turn off the gym fan", catalog, origin_area="Guest Room")
+    assert result.best is not None
+    assert result.best.candidate_id == "fan.gym_fan"
+    assert result.best.canonical_phrase.lower() == "turn off gym fan"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from .models import ConversationTarget, EntityTarget
 from .phonetics import normalize_text, phonetic_tokens, tokenize
 
 _LOGGER = logging.getLogger(__name__)
+SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
 
 
 def _entity_capabilities_from_domain(domain: str) -> list[str]:
@@ -75,6 +77,49 @@ def _tokenize_all(values: Iterable[str]) -> list[str]:
     return sorted(set(tokens))
 
 
+def _build_label_name_lookup(label_reg: Any) -> dict[str, str]:
+    """Best-effort map of label_id -> display name."""
+    labels = getattr(label_reg, "labels", None)
+    if isinstance(labels, dict):
+        output: dict[str, str] = {}
+        for label_id, label in labels.items():
+            name = getattr(label, "name", None)
+            if isinstance(name, str) and name.strip():
+                output[str(label_id)] = name.strip()
+        return output
+    return {}
+
+
+def _label_names_from_registry_object(obj: Any, label_lookup: dict[str, str]) -> list[str]:
+    """Return human-readable label names from a registry object if present."""
+    raw_labels = getattr(obj, "labels", None) or []
+    names: list[str] = []
+    for raw_label in raw_labels:
+        if hasattr(raw_label, "name"):
+            name = getattr(raw_label, "name", None)
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+            continue
+        if isinstance(raw_label, str):
+            names.append(label_lookup.get(raw_label, raw_label).strip())
+    return [name for name in names if name]
+
+
+def _extract_super_area(label_names: Iterable[str]) -> str | None:
+    """Extract `SuperArea: <name>` from label names."""
+    matches: list[str] = []
+    for label_name in label_names:
+        match = SUPER_AREA_LABEL_RE.match(str(label_name).strip())
+        if not match:
+            continue
+        candidate = match.group(1).strip()
+        if candidate:
+            matches.append(candidate)
+    if not matches:
+        return None
+    return sorted(set(matches), key=str.lower)[0]
+
+
 class _LenientLoader(yaml.SafeLoader):
     """YAML loader that tolerates Home Assistant custom tags like !input."""
 
@@ -117,6 +162,7 @@ class EntityCatalogSource:
         """Collect entity targets best-effort."""
         states_by_entity_id = {state.entity_id: state for state in hass.states.async_all()}
         area_lookup: dict[str, str] = {}
+        super_area_lookup: dict[str, str] = {}
         device_lookup: dict[str, str] = {}
         floor_lookup: dict[str, str] = {}
         aliases_lookup: dict[str, list[str]] = {}
@@ -136,13 +182,18 @@ class EntityCatalogSource:
         area_reg = None
         device_reg = None
         floor_reg = None
+        label_reg = None
+        label_lookup: dict[str, str] = {}
 
         try:
             from homeassistant.helpers import area_registry as ar
             from homeassistant.helpers import device_registry as dr
+            from homeassistant.helpers import label_registry as lr
 
             area_reg = ar.async_get(hass)
             device_reg = dr.async_get(hass)
+            label_reg = lr.async_get(hass)
+            label_lookup = _build_label_name_lookup(label_reg)
         except Exception as err:  # pragma: no cover - optional enrichment
             _LOGGER.debug("Area/device registry enrichment unavailable: %s", err)
 
@@ -179,12 +230,22 @@ class EntityCatalogSource:
 
             included_entity_ids.add(entry.entity_id)
             aliases_lookup[entry.entity_id] = list(getattr(entry, "aliases", []) or [])
+            entity_super_area = _extract_super_area(
+                _label_names_from_registry_object(entry, label_lookup)
+            )
+            if entity_super_area:
+                super_area_lookup[entry.entity_id] = entity_super_area
 
             try:
                 if area_reg is not None and entry.area_id:
                     area = area_reg.async_get_area(entry.area_id)
                     if area:
                         area_lookup[entry.entity_id] = area.name
+                        area_super_area = _extract_super_area(
+                            _label_names_from_registry_object(area, label_lookup)
+                        )
+                        if area_super_area and entry.entity_id not in super_area_lookup:
+                            super_area_lookup[entry.entity_id] = area_super_area
                         if floor_reg is not None and getattr(area, "floor_id", None):
                             floor = floor_reg.async_get_floor(area.floor_id)
                             if floor:
@@ -197,10 +258,20 @@ class EntityCatalogSource:
                     device = device_reg.async_get(entry.device_id)
                     if device:
                         device_lookup[entry.entity_id] = device.name_by_user or device.name
+                        device_super_area = _extract_super_area(
+                            _label_names_from_registry_object(device, label_lookup)
+                        )
+                        if device_super_area and entry.entity_id not in super_area_lookup:
+                            super_area_lookup[entry.entity_id] = device_super_area
                         if area_reg is not None and device.area_id:
                             area = area_reg.async_get_area(device.area_id)
                             if area:
                                 area_lookup.setdefault(entry.entity_id, area.name)
+                                area_super_area = _extract_super_area(
+                                    _label_names_from_registry_object(area, label_lookup)
+                                )
+                                if area_super_area and entry.entity_id not in super_area_lookup:
+                                    super_area_lookup[entry.entity_id] = area_super_area
                                 if floor_reg is not None and getattr(area, "floor_id", None):
                                     floor = floor_reg.async_get_floor(area.floor_id)
                                     if floor:
@@ -218,6 +289,7 @@ class EntityCatalogSource:
             name = state.name or entity_id
             aliases = aliases_lookup.get(entity_id, [])
             area_name = area_lookup.get(entity_id)
+            super_area_name = super_area_lookup.get(entity_id)
             floor = floor_lookup.get(entity_id)
             device_name = device_lookup.get(entity_id)
 
@@ -240,6 +312,7 @@ class EntityCatalogSource:
                     aliases=aliases,
                     domain=domain,
                     area=area_name,
+                    super_area=super_area_name,
                     floor=floor,
                     device_name=device_name,
                     exposed=True,

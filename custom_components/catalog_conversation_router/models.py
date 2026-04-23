@@ -55,6 +55,7 @@ class EntityTarget:
     aliases: list[str]
     domain: str
     area: str | None
+    super_area: str | None
     floor: str | None
     device_name: str | None
     exposed: bool | None
@@ -132,6 +133,7 @@ class MatchResult:
     parsed_target_after_normalization: str
     origin_area: str | None = None
     effective_area_hint: str | None = None
+    effective_super_area_hint: str | None = None
 
 
 @dataclass(slots=True)
@@ -175,6 +177,7 @@ class ResolutionTrace:
     exact_local_processed_locally: bool | None = None
     origin_area: str | None = None
     effective_area_hint: str | None = None
+    effective_super_area_hint: str | None = None
     failure_category: str | None = None
     top_fuzzy_candidates: list[dict[str, Any]] = field(default_factory=list)
     chosen_canonical_phrase: str | None = None

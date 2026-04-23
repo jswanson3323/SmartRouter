@@ -64,6 +64,7 @@ class _MatchResult:
         self.inferred_action = "turn_on"
         self.normalized_utterance = "turn on kitchen line"
         self.effective_area_hint = None
+        self.effective_super_area_hint = None
 
 
 class _Candidate:

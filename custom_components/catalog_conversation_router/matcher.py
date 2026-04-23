@@ -163,13 +163,29 @@ class FuzzyMatcher:
         utter_full_tokens = tokenize(normalized)
         utter_full_phonetic = set(phonetic_tokens(utter_full_tokens))
         effective_area_hint = parsed.area_hint or (normalize_text(origin_area) if origin_area else None)
+        effective_super_area_hint = self._resolve_effective_super_area_hint(
+            area_hint=effective_area_hint,
+            entities=catalog.entity_targets,
+        )
+        inferred_domain = self._infer_domain_from_tokens(utter_tokens)
+        generic_domain_request = self._is_generic_domain_request(utter_tokens, inferred_domain)
         area_scoped_domain_entity_id = self._resolve_area_scoped_domain_entity(
             utter_tokens=utter_tokens,
             action=parsed.action,
             entities=catalog.entity_targets,
             area_hint=effective_area_hint,
+            generic_domain_request=generic_domain_request,
         )
-        inferred_domain = self._infer_domain_from_tokens(utter_tokens)
+        super_area_scoped_domain_entity_id = None
+        if area_scoped_domain_entity_id is None:
+            super_area_scoped_domain_entity_id = self._resolve_super_area_scoped_domain_entity(
+                utter_tokens=utter_tokens,
+                action=parsed.action,
+                entities=catalog.entity_targets,
+                area_hint=effective_area_hint,
+                super_area_hint=effective_super_area_hint,
+                generic_domain_request=generic_domain_request,
+            )
 
         scores: list[CandidateScore] = []
 
@@ -212,7 +228,7 @@ class FuzzyMatcher:
                 score_detail["token_similarity"] = min(1.0, score_detail["token_similarity"] + domain_hint_match)
                 score_detail["structure_similarity"] = min(1.0, score_detail["structure_similarity"] + 0.1)
 
-            if effective_area_hint and entity.area:
+            if generic_domain_request and effective_area_hint and entity.area:
                 candidate_area_tokens = set(tokenize(normalize_text(entity.area)))
                 hint_tokens = set(tokenize(effective_area_hint))
                 area_match = 1.0 if hint_tokens and hint_tokens <= candidate_area_tokens else 0.0
@@ -246,9 +262,35 @@ class FuzzyMatcher:
                 score_detail["structure_similarity"] = max(0.0, score_detail["structure_similarity"] + area_preference_bonus)
                 score_detail["whole_target_similarity"] = max(0.0, score_detail["whole_target_similarity"] + (area_preference_bonus * 0.75))
 
+            super_area_preference_bonus = self._super_area_preference_bonus(
+                utter_tokens=utter_tokens,
+                inferred_domain=inferred_domain,
+                effective_area_hint=effective_area_hint,
+                effective_super_area_hint=effective_super_area_hint,
+                entity=entity,
+            )
+            score_detail["super_area_preference_bonus"] = super_area_preference_bonus
+            if super_area_preference_bonus > 0:
+                score_detail["token_similarity"] = min(1.0, score_detail["token_similarity"] + super_area_preference_bonus)
+                score_detail["structure_similarity"] = min(1.0, score_detail["structure_similarity"] + super_area_preference_bonus)
+                score_detail["whole_target_similarity"] = min(1.0, score_detail["whole_target_similarity"] + (super_area_preference_bonus * 0.75))
+                score_detail["phonetic_similarity"] = min(1.0, score_detail["phonetic_similarity"] + (super_area_preference_bonus * 0.5))
+            elif super_area_preference_bonus < 0:
+                score_detail["token_similarity"] = max(0.0, score_detail["token_similarity"] + super_area_preference_bonus)
+                score_detail["structure_similarity"] = max(0.0, score_detail["structure_similarity"] + super_area_preference_bonus)
+                score_detail["whole_target_similarity"] = max(0.0, score_detail["whole_target_similarity"] + (super_area_preference_bonus * 0.75))
+
+            if super_area_scoped_domain_entity_id and entity.entity_id == super_area_scoped_domain_entity_id:
+                score_detail["token_similarity"] = min(1.0, score_detail["token_similarity"] + 0.18)
+                score_detail["structure_similarity"] = min(1.0, score_detail["structure_similarity"] + 0.18)
+                score_detail["phonetic_similarity"] = min(1.0, score_detail["phonetic_similarity"] + 0.08)
+                score_detail["super_area_scoped_domain_resolution"] = 1.0
+
             final_score = self._weighted_score(score_detail)
             if area_scoped_domain_entity_id and entity.entity_id == area_scoped_domain_entity_id:
                 final_score = max(final_score, 0.95)
+            if super_area_scoped_domain_entity_id and entity.entity_id == super_area_scoped_domain_entity_id:
+                final_score = max(final_score, 0.91)
             scores.append(
                 CandidateScore(
                     candidate_id=entity.entity_id,
@@ -476,6 +518,11 @@ class FuzzyMatcher:
             if resolved:
                 remaining = [c for c in ranked if c.candidate_id != area_scoped_domain_entity_id]
                 ranked = [resolved, *remaining]
+        elif super_area_scoped_domain_entity_id:
+            resolved = next((c for c in ranked if c.candidate_id == super_area_scoped_domain_entity_id), None)
+            if resolved:
+                remaining = [c for c in ranked if c.candidate_id != super_area_scoped_domain_entity_id]
+                ranked = [resolved, *remaining]
         ranked = self._dedupe_by_canonical_phrase(ranked)
         top = ranked[:3]
         best = top[0] if top else None
@@ -488,6 +535,8 @@ class FuzzyMatcher:
         )
         if area_scoped_domain_entity_id and best and best.candidate_id == area_scoped_domain_entity_id:
             matched = True
+        if super_area_scoped_domain_entity_id and best and best.candidate_id == super_area_scoped_domain_entity_id:
+            matched = True
 
         return MatchResult(
             matched=matched,
@@ -499,6 +548,7 @@ class FuzzyMatcher:
             parsed_target_after_normalization=parsed_target_after,
             origin_area=origin_area,
             effective_area_hint=effective_area_hint,
+            effective_super_area_hint=effective_super_area_hint,
         )
 
     def _weighted_score(self, detail: dict[str, float]) -> float:
@@ -766,13 +816,14 @@ class FuzzyMatcher:
         action: str | None,
         entities: list[EntityTarget],
         area_hint: str | None,
+        generic_domain_request: bool,
     ) -> str | None:
         """Resolve deterministic area-scoped entity for generic domain targets.
 
         Example: "turn on the light" from "master bedroom" should resolve to
         the only `light` entity in that area, if exactly one exists.
         """
-        if not area_hint:
+        if not area_hint or not generic_domain_request:
             return None
 
         inferred_domain = self._infer_domain_from_tokens(utter_tokens)
@@ -789,6 +840,45 @@ class FuzzyMatcher:
                 continue
             entity_area_tokens = set(tokenize(normalize_text(entity.area)))
             if hint_tokens <= entity_area_tokens:
+                if self._action_compatibility(action, entity.capabilities) > 0.0:
+                    scoped_candidates.append(entity)
+
+        if len(scoped_candidates) == 1:
+            return scoped_candidates[0].entity_id
+        return None
+
+    def _resolve_super_area_scoped_domain_entity(
+        self,
+        *,
+        utter_tokens: list[str],
+        action: str | None,
+        entities: list[EntityTarget],
+        area_hint: str | None,
+        super_area_hint: str | None,
+        generic_domain_request: bool,
+    ) -> str | None:
+        """Resolve a unique same-super-area entity when area match is unavailable."""
+        if not super_area_hint or not generic_domain_request:
+            return None
+
+        inferred_domain = self._infer_domain_from_tokens(utter_tokens)
+        if not inferred_domain:
+            return None
+
+        super_area_tokens = set(tokenize(super_area_hint))
+        area_tokens = set(tokenize(area_hint)) if area_hint else set()
+        if not super_area_tokens:
+            return None
+
+        scoped_candidates = []
+        for entity in entities:
+            if entity.domain != inferred_domain or not entity.super_area:
+                continue
+            entity_super_area_tokens = set(tokenize(normalize_text(entity.super_area)))
+            entity_area_tokens = set(tokenize(normalize_text(entity.area))) if entity.area else set()
+            if area_tokens and area_tokens <= entity_area_tokens:
+                continue
+            if super_area_tokens <= entity_super_area_tokens:
                 if self._action_compatibility(action, entity.capabilities) > 0.0:
                     scoped_candidates.append(entity)
 
@@ -848,6 +938,63 @@ class FuzzyMatcher:
         if hint_tokens <= entity_area_tokens:
             return 0.35
         return -0.12
+
+    def _super_area_preference_bonus(
+        self,
+        *,
+        utter_tokens: list[str],
+        inferred_domain: str | None,
+        effective_area_hint: str | None,
+        effective_super_area_hint: str | None,
+        entity: EntityTarget,
+    ) -> float:
+        """Prefer same-super-area entities after direct area matching."""
+        if not effective_super_area_hint or not entity.super_area or not inferred_domain:
+            return 0.0
+        if entity.domain != inferred_domain:
+            return 0.0
+        if not self._is_generic_domain_request(utter_tokens, inferred_domain):
+            return 0.0
+
+        if effective_area_hint and entity.area:
+            area_tokens = set(tokenize(effective_area_hint))
+            entity_area_tokens = set(tokenize(normalize_text(entity.area)))
+            if area_tokens and area_tokens <= entity_area_tokens:
+                return 0.0
+
+        super_area_tokens = set(tokenize(effective_super_area_hint))
+        entity_super_area_tokens = set(tokenize(normalize_text(entity.super_area)))
+        if not super_area_tokens or not entity_super_area_tokens:
+            return 0.0
+
+        if super_area_tokens <= entity_super_area_tokens:
+            return 0.18
+        return -0.06
+
+    def _resolve_effective_super_area_hint(
+        self,
+        *,
+        area_hint: str | None,
+        entities: list[EntityTarget],
+    ) -> str | None:
+        """Infer the SuperArea for the active area from catalog entities."""
+        if not area_hint:
+            return None
+
+        area_tokens = set(tokenize(area_hint))
+        if not area_tokens:
+            return None
+
+        matches = {
+            entity.super_area.strip()
+            for entity in entities
+            if entity.area
+            and entity.super_area
+            and area_tokens <= set(tokenize(normalize_text(entity.area)))
+        }
+        if len(matches) == 1:
+            return next(iter(matches))
+        return None
 
     def _set_similarity(self, left: set[str], right: set[str]) -> float:
         if not left or not right:

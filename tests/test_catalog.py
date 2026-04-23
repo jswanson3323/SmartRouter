@@ -38,6 +38,7 @@ class _FakeEntityEntry:
         aliases=None,
         area_id=None,
         device_id=None,
+        labels=None,
     ) -> None:
         self.entity_id = entity_id
         self.disabled_by = disabled_by
@@ -46,6 +47,7 @@ class _FakeEntityEntry:
         self.aliases = aliases or []
         self.area_id = area_id
         self.device_id = device_id
+        self.labels = labels or []
 
 
 class _FakeEntityRegistry:
@@ -54,9 +56,10 @@ class _FakeEntityRegistry:
 
 
 class _FakeArea:
-    def __init__(self, name: str, floor_id=None) -> None:
+    def __init__(self, name: str, floor_id=None, labels=None) -> None:
         self.name = name
         self.floor_id = floor_id
+        self.labels = labels or []
 
 
 class _FakeAreaRegistry:
@@ -68,10 +71,11 @@ class _FakeAreaRegistry:
 
 
 class _FakeDevice:
-    def __init__(self, name: str, area_id=None) -> None:
+    def __init__(self, name: str, area_id=None, labels=None) -> None:
         self.name = name
         self.name_by_user = None
         self.area_id = area_id
+        self.labels = labels or []
 
 
 class _FakeDeviceRegistry:
@@ -103,6 +107,7 @@ class _FakeHass:
         self._area_reg = _FakeAreaRegistry({"area_kitchen": _FakeArea("Kitchen", "f1")})
         self._device_reg = _FakeDeviceRegistry({"dev1": _FakeDevice("Kitchen Device", "area_kitchen")})
         self._floor_reg = _FakeFloorRegistry({"f1": _FakeFloor("First Floor")})
+        self._label_reg = types.SimpleNamespace(labels={})
         self._exposure_map = exposure_map or {}
 
 
@@ -124,6 +129,9 @@ def _install_fake_registry_modules(monkeypatch, hass: _FakeHass) -> None:
     fr_mod = types.ModuleType("homeassistant.helpers.floor_registry")
     fr_mod.async_get = lambda _hass: hass._floor_reg
 
+    lr_mod = types.ModuleType("homeassistant.helpers.label_registry")
+    lr_mod.async_get = lambda _hass: hass._label_reg
+
     ee_mod = types.ModuleType("homeassistant.components.homeassistant.exposed_entities")
 
     async def _async_should_expose(_hass, _assistant, entity_id):
@@ -139,6 +147,7 @@ def _install_fake_registry_modules(monkeypatch, hass: _FakeHass) -> None:
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", dr_mod)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", er_mod)
     monkeypatch.setitem(sys.modules, "homeassistant.helpers.floor_registry", fr_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.label_registry", lr_mod)
     monkeypatch.setitem(
         sys.modules,
         "homeassistant.components.homeassistant.exposed_entities",
@@ -245,3 +254,32 @@ def test_catalog_stats_shape(monkeypatch: pytest.MonkeyPatch) -> None:
         "conversation_target_count",
         "refresh_failures",
     }
+
+
+def test_area_super_area_label_is_added_to_entity_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = _FakeHass(
+        [_FakeState("light.kitchen", "Kitchen Light")],
+        [
+            _FakeEntityEntry(
+                entity_id="light.kitchen",
+                exposed_by="assist",
+                area_id="area_kitchen",
+                device_id="dev1",
+            )
+        ],
+    )
+    hass._area_reg = _FakeAreaRegistry(
+        {"area_kitchen": _FakeArea("Kitchen", "f1", labels=["label_upstairs"])}
+    )
+    hass._label_reg = types.SimpleNamespace(
+        labels={"label_upstairs": types.SimpleNamespace(name="SuperArea: Upstairs")}
+    )
+    _install_fake_registry_modules(monkeypatch, hass)
+
+    manager = CatalogManager(hass, _config())
+    catalog = asyncio.run(manager.async_rebuild())
+
+    assert catalog.entity_targets[0].area == "Kitchen"
+    assert catalog.entity_targets[0].super_area == "Upstairs"

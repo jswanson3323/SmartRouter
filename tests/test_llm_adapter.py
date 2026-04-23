@@ -31,7 +31,7 @@ def test_translation_prompt_includes_origin_area_context() -> None:
             revision="r1",
             last_refreshed="now",
             language="en",
-            entity_count=2,
+            entity_count=3,
             conversation_target_count=0,
         ),
         entity_targets=[
@@ -42,6 +42,7 @@ def test_translation_prompt_includes_origin_area_context() -> None:
                 aliases=[],
                 domain="light",
                 area="Master Bedroom",
+                super_area="Upstairs",
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -50,12 +51,28 @@ def test_translation_prompt_includes_origin_area_context() -> None:
                 phonetic_tokens=["M236", "B365", "L230"],
             ),
             EntityTarget(
+                entity_id="light.hall_light",
+                name="Hall Light",
+                normalized_name="hall light",
+                aliases=[],
+                domain="light",
+                area="Hall",
+                super_area="Upstairs",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["hall", "light"],
+                phonetic_tokens=["H400", "L230"],
+            ),
+            EntityTarget(
                 entity_id="light.gym_light",
                 name="Gym Light",
                 normalized_name="gym light",
                 aliases=[],
                 domain="light",
                 area="Gym",
+                super_area="Downstairs",
                 floor=None,
                 device_name=None,
                 exposed=True,
@@ -74,4 +91,6 @@ def test_translation_prompt_includes_origin_area_context() -> None:
         origin_area="Master Bedroom",
     )
     assert "Origin area: 'Master Bedroom'" in prompt
+    assert "Origin SuperArea: 'Upstairs'" in prompt
     assert "Origin-area entity targets: ['Master Bedroom Light']" in prompt
+    assert "Origin-SuperArea entity targets: ['Hall Light']" in prompt

@@ -133,6 +133,22 @@ class LLMAdapter:
             and e.area
             and origin_area.strip().lower() == e.area.strip().lower()
         ][:max_candidates]
+        origin_super_area = self._infer_super_area_from_origin_area(
+            origin_area=origin_area,
+            catalog=catalog,
+        )
+        super_area_entity_candidates = [
+            e.name
+            for e in catalog.entity_targets
+            if origin_super_area
+            and e.super_area
+            and origin_super_area.strip().lower() == e.super_area.strip().lower()
+            and not (
+                origin_area
+                and e.area
+                and origin_area.strip().lower() == e.area.strip().lower()
+            )
+        ][:max_candidates]
 
         schema = {
             "mode": "translate_for_local | fallback_answer",
@@ -147,17 +163,39 @@ class LLMAdapter:
             "Do NOT execute commands, only translate when confident. "
             "Correct likely ASR mistakes but only to listed valid targets. "
             "Never invent entities, areas, custom targets, or canonical commands. canonical_text must use only the exact listed entity target names or exact listed conversation target phrases; otherwise return mode=fallback_answer with canonical_text=null. "
-            "If origin area is provided, strongly prefer matching entities in that area. "
-            "For generic room-local requests like 'turn on the light', choose an in-area entity when available. "
+            "If origin area is provided, strongly prefer matching entities in that area first. "
+            "If no entity in the origin area fits, use the origin SuperArea as a second pass. "
+            "For generic room-local requests like 'turn on the light', choose an in-area entity when available; otherwise prefer an entity from the same SuperArea. "
             f"Language: {language}. "
             f"Original utterance: {utterance!r}. "
             f"Origin area: {origin_area!r}. "
+            f"Origin SuperArea: {origin_super_area!r}. "
             f"Origin-area entity targets: {area_entity_candidates}. "
+            f"Origin-SuperArea entity targets: {super_area_entity_candidates}. "
             f"Entity targets: {entity_candidates}. "
             f"Conversation targets: {conversation_candidates}. "
             "Return ONLY a single JSON object and nothing else. Do not include explanations, prefixes, suffixes, or text before or after the JSON. If unsure, return mode=fallback_answer with canonical_text=null. JSON schema: "
             f"{json.dumps(schema)}"
         )
+
+    def _infer_super_area_from_origin_area(
+        self,
+        *,
+        origin_area: str | None,
+        catalog: Catalog,
+    ) -> str | None:
+        if not origin_area:
+            return None
+
+        area_name = origin_area.strip().lower()
+        matches = {
+            e.super_area.strip()
+            for e in catalog.entity_targets
+            if e.area and e.super_area and e.area.strip().lower() == area_name
+        }
+        if len(matches) == 1:
+            return next(iter(matches))
+        return None
 
     def _parse_translation_json(self, text: str) -> LLMTranslationResult:
         # First try strict JSON parsing (best case: model returned pure JSON)

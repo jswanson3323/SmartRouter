@@ -62,6 +62,7 @@ class AgentRouter:
             catalog_revision=catalog.metadata.revision,
             origin_area=resolved_origin_area,
             effective_area_hint=match_result.effective_area_hint,
+            effective_super_area_hint=match_result.effective_super_area_hint,
         )
 
         # 1) fuzzy attempt
@@ -142,7 +143,10 @@ class AgentRouter:
                 candidate_detail = match_result.best.detail or {}
                 forced_area_resolution = (
                     decision.reason == "ambiguity_gap_too_small"
-                    and candidate_detail.get("area_scoped_domain_resolution") == 1.0
+                    and (
+                        candidate_detail.get("area_scoped_domain_resolution") == 1.0
+                        or candidate_detail.get("super_area_scoped_domain_resolution") == 1.0
+                    )
                 )
                 if forced_area_resolution:
                     trace.chosen_canonical_phrase = match_result.best.canonical_phrase

@@ -171,6 +171,8 @@ class LLMAdapter:
             "Do NOT execute commands, only translate when confident. "
             "Correct likely ASR mistakes but only to listed valid targets. "
             "Never invent entities, areas, custom targets, or canonical commands. canonical_text must use only the exact listed entity target names or exact listed conversation target phrases; otherwise return mode=fallback_answer with canonical_text=null. "
+            "canonical_text must be a full natural-language command or exact listed conversation phrase. "
+            "Never return tool names, function names, API names, service names, domain names, or internal identifiers such as HassTurnOn, turn_on, light, fan, script, scene, automation, or homeassistant. "
             "If origin area is provided, strongly prefer matching entities in that area first. "
             "If no entity in the origin area fits, use the origin SuperArea as a second pass. "
             "For generic room-local requests like 'turn on the light', choose an in-area entity when available; otherwise prefer an entity from the same SuperArea. "

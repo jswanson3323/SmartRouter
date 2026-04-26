@@ -231,7 +231,17 @@ class AgentRouter:
                 _LOGGER.debug("Fuzzy candidate rejected: %s", decision.reason)
 
         # 2) LLM translation to local
-        if self._config.llm_translate_enabled:
+        should_run_llm_translation = self._config.llm_translate_enabled and selected_path is None
+        if not should_run_llm_translation:
+            trace.llm_translation_summary = {
+                "mode": "skipped",
+                "confidence": 0.0,
+                "target_type": "unknown",
+                "valid": False,
+                "notes": "skipped_due_to_fuzzy_match" if selected_path == ResolutionPath.FUZZY_LOCAL else "skipped",
+            }
+            trace.llm_translated_local_executed = False
+        if should_run_llm_translation:
             translation = await self._llm_adapter.async_translate_for_local(
                 llm_agent_id=self._config.llm_agent_id,
                 utterance=text,

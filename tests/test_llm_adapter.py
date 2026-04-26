@@ -94,6 +94,8 @@ def test_translation_prompt_includes_origin_area_context() -> None:
     assert "Origin SuperArea: 'Upstairs'" in prompt
     assert "Origin-area entity targets: ['Master Bedroom Light']" in prompt
     assert "Origin-SuperArea entity targets: ['Hall Light']" in prompt
+    assert "Never return tool names" in prompt
+    assert "HassTurnOn" in prompt
 
 
 def test_invalid_llm_canonical_text_is_rejected_against_catalog() -> None:

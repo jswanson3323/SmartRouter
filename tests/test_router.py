@@ -158,6 +158,33 @@ def test_fuzzy_path_success() -> None:
     assert result.path.value == "fuzzy_local"
 
 
+def test_debug_collection_skips_llm_translation_after_fuzzy_match() -> None:
+    match = _MatchResult(best=_Candidate("turn on kitchen light"), top=[_Candidate("turn on kitchen light")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(True)]),
+        llm_adapter=_FakeLLMAdapter(_Translation(True, "turn on gym light"), _outcome(True)),
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="turn on kitchen line",
+            language="en",
+            conversation_id=None,
+            context=None,
+            dry_run=True,
+            debug_collect_all=True,
+        )
+    )
+    assert result.path.value == "fuzzy_local"
+    assert result.trace.llm_translation_summary is not None
+    assert result.trace.llm_translation_summary["mode"] == "skipped"
+    assert result.trace.llm_translation_summary["notes"] == "skipped_due_to_fuzzy_match"
+    assert result.trace.llm_translated_local_executed is False
+
+
 def test_llm_translated_local_success() -> None:
     match = _MatchResult(best=None, top=[])
     router = AgentRouter(

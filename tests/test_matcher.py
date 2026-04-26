@@ -531,3 +531,48 @@ def test_generic_fan_request_prefers_entity_over_spa_conversation_target() -> No
     assert result.best is not None
     assert result.best.candidate_id == "fan.great_room_fan"
     assert result.best.canonical_phrase.lower() == "turn on great room fan"
+
+
+def test_exact_conversation_match_wins_over_same_family_slot_variant() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r9",
+            last_refreshed="now",
+            language="en",
+            entity_count=0,
+            conversation_target_count=2,
+        ),
+        entity_targets=[],
+        conversation_targets=[
+            ConversationTarget(
+                target_id="automation_blueprint:custom/blueprint-spa.yaml:spa_on_ask",
+                type="automation_blueprint",
+                display_name="Spa Control",
+                normalized_name="spa control",
+                sample_phrases=["turn on the spa"],
+                canonical_phrase="turn on the spa",
+                source="automation_blueprint",
+                slots=[],
+                tokens=["turn", "on", "spa"],
+                phonetic_tokens=["T650", "O500", "S100"],
+            ),
+            ConversationTarget(
+                target_id="automation_blueprint:custom/blueprint-spa.yaml:spa_set_temp",
+                type="automation_blueprint",
+                display_name="Spa Control",
+                normalized_name="spa control",
+                sample_phrases=["turn on the spa to {amount}"],
+                canonical_phrase="set the spa to {amount}",
+                source="automation_blueprint",
+                slots=["amount"],
+                tokens=["turn", "on", "spa", "amount"],
+                phonetic_tokens=["T650", "O500", "S100", "A553"],
+            ),
+        ],
+    )
+    matcher = FuzzyMatcher(fuzzy_threshold=0.63, ambiguity_gap=0.025)
+    result = matcher.match("turn on the spa", catalog, origin_area="Office")
+    assert result.best is not None
+    assert result.best.candidate_id == "automation_blueprint:custom/blueprint-spa.yaml:spa_on_ask"
+    assert result.best.canonical_phrase == "turn on the spa"
+    assert result.matched is True

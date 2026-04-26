@@ -422,6 +422,12 @@ class FuzzyMatcher:
                         1.0,
                         score_detail["whole_target_similarity"] + max(0.0, pattern_bonus * 0.3),
                     )
+                if total_slots > matched_slots:
+                    missing_slots = total_slots - matched_slots
+                    slot_penalty = min(0.25, 0.10 * missing_slots)
+                    score_detail["token_similarity"] = max(0.0, score_detail["token_similarity"] - slot_penalty)
+                    score_detail["structure_similarity"] = max(0.0, score_detail["structure_similarity"] - slot_penalty)
+                    score_detail["whole_target_similarity"] = max(0.0, score_detail["whole_target_similarity"] - slot_penalty)
 
                 phrase_score = self._weighted_score(score_detail)
                 if phrase_score > best_phrase_score:
@@ -506,6 +512,12 @@ class FuzzyMatcher:
                     1.0,
                     score_detail["whole_target_similarity"] + max(0.0, pattern_bonus * 0.3),
                 )
+            if total_slots > matched_slots:
+                missing_slots = total_slots - matched_slots
+                slot_penalty = min(0.25, 0.10 * missing_slots)
+                score_detail["token_similarity"] = max(0.0, score_detail["token_similarity"] - slot_penalty)
+                score_detail["structure_similarity"] = max(0.0, score_detail["structure_similarity"] - slot_penalty)
+                score_detail["whole_target_similarity"] = max(0.0, score_detail["whole_target_similarity"] - slot_penalty)
 
             final_score = self._weighted_score(score_detail)
             scores.append(
@@ -518,6 +530,12 @@ class FuzzyMatcher:
                     target_name=target.display_name,
                     detail={
                         **score_detail,
+                        "candidate_family": self._candidate_family(target.target_id),
+                        "exact_phrase_match": self._is_exact_conversation_phrase_match(
+                            utterance_normalized=normalized,
+                            raw_phrase=best_phrase_raw,
+                            canonical_phrase=target.canonical_phrase,
+                        ),
                         "matched_sample_phrase": best_phrase,
                         "matched_sample_phrase_raw": best_phrase_raw,
                         "matched_sample_phrase_normalized_for_scoring": best_phrase_for_scoring,
@@ -542,12 +560,29 @@ class FuzzyMatcher:
         top = ranked[:3]
         best = top[0] if top else None
         second = top[1] if len(top) > 1 else None
+        best_detail = best.detail if best is not None else {}
+        second_detail = second.detail if second is not None else {}
 
         matched = bool(
             best
             and best.score >= self._fuzzy_threshold
             and (best.score - (second.score if second else 0.0)) >= self._ambiguity_gap
         )
+        if (
+            best
+            and best.candidate_type == CandidateType.CONVERSATION_TARGET
+            and best_detail.get("exact_phrase_match") is True
+        ):
+            matched = True
+        if (
+            best
+            and second
+            and best.candidate_type == CandidateType.CONVERSATION_TARGET
+            and second.candidate_type == CandidateType.CONVERSATION_TARGET
+            and best_detail.get("candidate_family")
+            and best_detail.get("candidate_family") == second_detail.get("candidate_family")
+        ):
+            matched = True
         if area_scoped_domain_entity_id and best and best.candidate_id == area_scoped_domain_entity_id:
             matched = True
         if super_area_scoped_domain_entity_id and best and best.candidate_id == super_area_scoped_domain_entity_id:
@@ -1188,6 +1223,24 @@ class FuzzyMatcher:
         if prefix == "what is":
             return f"what is {name}"
         return f"{prefix} {name}"
+
+    def _candidate_family(self, candidate_id: str) -> str | None:
+        if not candidate_id or ":" not in candidate_id:
+            return None
+        return candidate_id.rsplit(":", 1)[0]
+
+    def _is_exact_conversation_phrase_match(
+        self,
+        *,
+        utterance_normalized: str,
+        raw_phrase: str,
+        canonical_phrase: str,
+    ) -> bool:
+        utterance_text = normalize_text(utterance_normalized)
+        return (
+            utterance_text == normalize_text(raw_phrase)
+            or utterance_text == normalize_text(canonical_phrase)
+        )
 
     def _normalize_asr_target_tokens(self, target_phrase: str) -> list[str]:
         """Normalize likely ASR noun substitutions before scoring."""

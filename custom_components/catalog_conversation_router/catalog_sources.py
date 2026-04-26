@@ -16,6 +16,7 @@ from .phonetics import normalize_text, phonetic_tokens, tokenize
 
 _LOGGER = logging.getLogger(__name__)
 SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
+SUPER_AREA_LABEL_ID_RE = re.compile(r"^superarea[_\-\s]+(.+)$", re.IGNORECASE)
 SUPER_AREA_DIAGNOSTIC_AREAS = {"kitchen", "great room", "dining room"}
 
 
@@ -107,7 +108,11 @@ def _build_label_name_lookup(label_reg: Any) -> dict[str, str]:
     return output
 
 
-def _label_names_from_registry_object(obj: Any, label_lookup: dict[str, str]) -> list[str]:
+def _label_names_from_registry_object(
+    obj: Any,
+    label_lookup: dict[str, str],
+    label_reg: Any | None = None,
+) -> list[str]:
     """Return human-readable label names from a registry object if present."""
     raw_labels = (
         getattr(obj, "labels", None)
@@ -122,7 +127,17 @@ def _label_names_from_registry_object(obj: Any, label_lookup: dict[str, str]) ->
                 names.append(name.strip())
             continue
         if isinstance(raw_label, str):
-            names.append(label_lookup.get(raw_label, raw_label).strip())
+            resolved_name = label_lookup.get(raw_label)
+            if resolved_name is None and label_reg is not None and hasattr(label_reg, "async_get_label"):
+                try:
+                    label_obj = label_reg.async_get_label(raw_label)
+                    label_name = getattr(label_obj, "name", None) if label_obj is not None else None
+                    if isinstance(label_name, str) and label_name.strip():
+                        resolved_name = label_name.strip()
+                        label_lookup[str(raw_label)] = resolved_name
+                except Exception:
+                    resolved_name = None
+            names.append((resolved_name or raw_label).strip())
     return [name for name in names if name]
 
 
@@ -130,10 +145,15 @@ def _extract_super_area(label_names: Iterable[str]) -> str | None:
     """Extract `SuperArea: <name>` from label names."""
     matches: list[str] = []
     for label_name in label_names:
-        match = SUPER_AREA_LABEL_RE.match(str(label_name).strip())
-        if not match:
-            continue
-        candidate = match.group(1).strip()
+        normalized_label_name = str(label_name).strip()
+        match = SUPER_AREA_LABEL_RE.match(normalized_label_name)
+        if match:
+            candidate = match.group(1).strip()
+        else:
+            id_match = SUPER_AREA_LABEL_ID_RE.match(normalized_label_name)
+            if not id_match:
+                continue
+            candidate = id_match.group(1).strip().replace("_", " ").replace("-", " ")
         if candidate:
             matches.append(candidate)
     if not matches:
@@ -253,7 +273,7 @@ class EntityCatalogSource:
             included_entity_ids.add(entry.entity_id)
             aliases_lookup[entry.entity_id] = list(getattr(entry, "aliases", []) or [])
             entity_super_area = _extract_super_area(
-                _label_names_from_registry_object(entry, label_lookup)
+                _label_names_from_registry_object(entry, label_lookup, label_reg)
             )
             if entity_super_area:
                 super_area_lookup[entry.entity_id] = entity_super_area
@@ -284,12 +304,12 @@ class EntityCatalogSource:
                                 getattr(area, "label_ids", None),
                                 label_reg_attrs,
                                 sorted(label_lookup.keys()),
-                                _label_names_from_registry_object(area, label_lookup),
-                                _extract_super_area(_label_names_from_registry_object(area, label_lookup)),
+                                _label_names_from_registry_object(area, label_lookup, label_reg),
+                                _extract_super_area(_label_names_from_registry_object(area, label_lookup, label_reg)),
                             )
                         area_lookup[entry.entity_id] = area.name
                         area_super_area = _extract_super_area(
-                            _label_names_from_registry_object(area, label_lookup)
+                            _label_names_from_registry_object(area, label_lookup, label_reg)
                         )
                         if area_super_area and entry.entity_id not in super_area_lookup:
                             super_area_lookup[entry.entity_id] = area_super_area
@@ -306,7 +326,7 @@ class EntityCatalogSource:
                     if device:
                         device_lookup[entry.entity_id] = device.name_by_user or device.name
                         device_super_area = _extract_super_area(
-                            _label_names_from_registry_object(device, label_lookup)
+                            _label_names_from_registry_object(device, label_lookup, label_reg)
                         )
                         if device_super_area and entry.entity_id not in super_area_lookup:
                             super_area_lookup[entry.entity_id] = device_super_area
@@ -315,7 +335,7 @@ class EntityCatalogSource:
                             if area:
                                 area_lookup.setdefault(entry.entity_id, area.name)
                                 area_super_area = _extract_super_area(
-                                    _label_names_from_registry_object(area, label_lookup)
+                                    _label_names_from_registry_object(area, label_lookup, label_reg)
                                 )
                                 if area_super_area and entry.entity_id not in super_area_lookup:
                                     super_area_lookup[entry.entity_id] = area_super_area

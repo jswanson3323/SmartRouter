@@ -79,15 +79,31 @@ def _tokenize_all(values: Iterable[str]) -> list[str]:
 
 def _build_label_name_lookup(label_reg: Any) -> dict[str, str]:
     """Best-effort map of label_id -> display name."""
-    labels = getattr(label_reg, "labels", None)
-    if isinstance(labels, dict):
-        output: dict[str, str] = {}
-        for label_id, label in labels.items():
-            name = getattr(label, "name", None)
-            if isinstance(name, str) and name.strip():
-                output[str(label_id)] = name.strip()
-        return output
-    return {}
+    output: dict[str, str] = {}
+
+    for attr_name in ("labels", "_labels"):
+        labels = getattr(label_reg, attr_name, None)
+        if isinstance(labels, dict):
+            for label_id, label in labels.items():
+                name = getattr(label, "name", None)
+                if isinstance(name, str) and name.strip():
+                    output[str(label_id)] = name.strip()
+
+    # Some HA versions may expose label collections as iterables rather than dicts.
+    for attr_name in ("labels", "_labels"):
+        labels = getattr(label_reg, attr_name, None)
+        if labels is None or isinstance(labels, dict):
+            continue
+        try:
+            for label in labels:
+                label_id = getattr(label, "label_id", None) or getattr(label, "id", None)
+                name = getattr(label, "name", None)
+                if label_id is not None and isinstance(name, str) and name.strip():
+                    output[str(label_id)] = name.strip()
+        except Exception:
+            continue
+
+    return output
 
 
 def _label_names_from_registry_object(obj: Any, label_lookup: dict[str, str]) -> list[str]:
@@ -247,12 +263,21 @@ class EntityCatalogSource:
                     if area:
                         if not logged_area_label_diagnostic:
                             logged_area_label_diagnostic = True
+                            label_reg_attrs = {
+                                "type": type(label_reg).__name__ if label_reg is not None else None,
+                                "has_labels": hasattr(label_reg, "labels") if label_reg is not None else False,
+                                "has__labels": hasattr(label_reg, "_labels") if label_reg is not None else False,
+                                "has_async_get_label": hasattr(label_reg, "async_get_label") if label_reg is not None else False,
+                                "labels_type": type(getattr(label_reg, "labels", None)).__name__ if label_reg is not None and getattr(label_reg, "labels", None) is not None else None,
+                                "_labels_type": type(getattr(label_reg, "_labels", None)).__name__ if label_reg is not None and getattr(label_reg, "_labels", None) is not None else None,
+                            }
                             _LOGGER.warning(
-                                "SuperArea diagnostic: area_id=%s area_name=%s area_labels=%r area_label_ids=%r label_lookup_keys=%s extracted_names=%r extracted_super_area=%r",
+                                "SuperArea diagnostic: area_id=%s area_name=%s area_labels=%r area_label_ids=%r label_reg_attrs=%r label_lookup_keys=%s extracted_names=%r extracted_super_area=%r",
                                 entry.area_id,
                                 getattr(area, "name", None),
                                 getattr(area, "labels", None),
                                 getattr(area, "label_ids", None),
+                                label_reg_attrs,
                                 sorted(label_lookup.keys()),
                                 _label_names_from_registry_object(area, label_lookup),
                                 _extract_super_area(_label_names_from_registry_object(area, label_lookup)),

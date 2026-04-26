@@ -92,7 +92,11 @@ def _build_label_name_lookup(label_reg: Any) -> dict[str, str]:
 
 def _label_names_from_registry_object(obj: Any, label_lookup: dict[str, str]) -> list[str]:
     """Return human-readable label names from a registry object if present."""
-    raw_labels = getattr(obj, "labels", None) or []
+    raw_labels = (
+        getattr(obj, "labels", None)
+        or getattr(obj, "label_ids", None)
+        or []
+    )
     names: list[str] = []
     for raw_label in raw_labels:
         if hasattr(raw_label, "name"):
@@ -184,6 +188,7 @@ class EntityCatalogSource:
         floor_reg = None
         label_reg = None
         label_lookup: dict[str, str] = {}
+        logged_area_label_diagnostic = False
 
         try:
             from homeassistant.helpers import area_registry as ar
@@ -240,6 +245,18 @@ class EntityCatalogSource:
                 if area_reg is not None and entry.area_id:
                     area = area_reg.async_get_area(entry.area_id)
                     if area:
+                        if not logged_area_label_diagnostic:
+                            logged_area_label_diagnostic = True
+                            _LOGGER.warning(
+                                "SuperArea diagnostic: area_id=%s area_name=%s area_labels=%r area_label_ids=%r label_lookup_keys=%s extracted_names=%r extracted_super_area=%r",
+                                entry.area_id,
+                                getattr(area, "name", None),
+                                getattr(area, "labels", None),
+                                getattr(area, "label_ids", None),
+                                sorted(label_lookup.keys()),
+                                _label_names_from_registry_object(area, label_lookup),
+                                _extract_super_area(_label_names_from_registry_object(area, label_lookup)),
+                            )
                         area_lookup[entry.entity_id] = area.name
                         area_super_area = _extract_super_area(
                             _label_names_from_registry_object(area, label_lookup)

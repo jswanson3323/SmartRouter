@@ -283,3 +283,32 @@ def test_area_super_area_label_is_added_to_entity_catalog(
 
     assert catalog.entity_targets[0].area == "Kitchen"
     assert catalog.entity_targets[0].super_area == "Upstairs"
+
+
+def test_area_super_area_label_ids_are_added_to_entity_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = _FakeHass(
+        [_FakeState("light.kitchen", "Kitchen Light")],
+        [
+            _FakeEntityEntry(
+                entity_id="light.kitchen",
+                exposed_by="assist",
+                area_id="area_kitchen",
+                device_id="dev1",
+            )
+        ],
+    )
+    hass._area_reg = _FakeAreaRegistry(
+        {"area_kitchen": types.SimpleNamespace(name="Kitchen", floor_id="f1", label_ids=["label_upstairs"])}
+    )
+    hass._label_reg = types.SimpleNamespace(
+        labels={"label_upstairs": types.SimpleNamespace(name="SuperArea: Upstairs")}
+    )
+    _install_fake_registry_modules(monkeypatch, hass)
+
+    manager = CatalogManager(hass, _config())
+    catalog = asyncio.run(manager.async_rebuild())
+
+    assert catalog.entity_targets[0].area == "Kitchen"
+    assert catalog.entity_targets[0].super_area == "Upstairs"

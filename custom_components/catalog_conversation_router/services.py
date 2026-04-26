@@ -11,6 +11,7 @@ import voluptuous as vol
 
 from .const import (
     ATTR_AREA,
+    ATTR_EXECUTE_BRANCHES,
     ATTR_PATH,
     ATTR_TEXT,
     DOMAIN,
@@ -19,6 +20,7 @@ from .const import (
     SERVICE_GET_CATALOG_STATS,
     SERVICE_REBUILD_CATALOG,
     SERVICE_TEST_UTTERANCE,
+    SERVICE_TEST_UTTERANCE_TO_FILE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,6 +48,7 @@ async def async_register_services(hass) -> None:
     async def _test_utterance(call) -> dict[str, Any]:
         text = call.data[ATTR_TEXT]
         origin_area = call.data.get(ATTR_AREA)
+        execute_branches = bool(call.data.get(ATTR_EXECUTE_BRANCHES, False))
         output: dict[str, Any] = {}
         for entry_id, runtime in hass.data.get(DOMAIN, {}).items():
             result = await runtime.router.async_route(
@@ -54,15 +57,36 @@ async def async_register_services(hass) -> None:
                 conversation_id=None,
                 context=call.context,
                 dry_run=True,
+                debug_collect_all=True,
+                execute_debug_branches=execute_branches,
                 origin_area=origin_area,
             )
             output[entry_id] = {
                 "path": result.path.value,
                 "trace": result.trace.as_dict(),
             }
-        return {"entries": output}
+        return {"text": text, "area": origin_area, "execute_branches": execute_branches, "entries": output}
 
+    async def _test_utterance_to_file(call) -> dict[str, Any]:
+        text = call.data[ATTR_TEXT]
+        origin_area = call.data.get(ATTR_AREA)
+        relative_path = call.data.get(ATTR_PATH, "catalog_router_test_utterance.json")
+        safe_name = Path(str(relative_path)).name
+        output_path = Path("/config") / safe_name
 
+        result_payload = await _test_utterance(call)
+        payload = {
+            "text": text,
+            "area": origin_area,
+            "execute_branches": bool(call.data.get(ATTR_EXECUTE_BRANCHES, False)),
+            "entries": result_payload["entries"],
+        }
+
+        def _write() -> None:
+            output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        await hass.async_add_executor_job(_write)
+        return {"path": str(output_path), "entries": result_payload["entries"]}
 
     async def _dump_catalog_to_file(call) -> dict[str, Any]:
         relative_path = call.data.get(ATTR_PATH, "catalog_router_catalog.json")
@@ -168,7 +192,21 @@ async def async_register_services(hass) -> None:
     stats_schema = vol.Schema({})
     dump_schema = vol.Schema({})
     dump_file_schema = vol.Schema({vol.Optional(ATTR_PATH): str})
-    test_schema = vol.Schema({vol.Required(ATTR_TEXT): str, vol.Optional(ATTR_AREA): str})
+    test_schema = vol.Schema(
+        {
+            vol.Required(ATTR_TEXT): str,
+            vol.Optional(ATTR_AREA): str,
+            vol.Optional(ATTR_EXECUTE_BRANCHES): bool,
+        }
+    )
+    test_file_schema = vol.Schema(
+        {
+            vol.Required(ATTR_TEXT): str,
+            vol.Optional(ATTR_AREA): str,
+            vol.Optional(ATTR_PATH): str,
+            vol.Optional(ATTR_EXECUTE_BRANCHES): bool,
+        }
+    )
 
     if SupportsResponse is not None:
         if not hass.services.has_service(DOMAIN, SERVICE_GET_CATALOG_STATS):
@@ -185,6 +223,14 @@ async def async_register_services(hass) -> None:
                 SERVICE_TEST_UTTERANCE,
                 _test_utterance,
                 schema=test_schema,
+                supports_response=SupportsResponse.ONLY,
+            )
+        if not hass.services.has_service(DOMAIN, SERVICE_TEST_UTTERANCE_TO_FILE):
+            hass.services.async_register(
+                DOMAIN,
+                SERVICE_TEST_UTTERANCE_TO_FILE,
+                _test_utterance_to_file,
+                schema=test_file_schema,
                 supports_response=SupportsResponse.ONLY,
             )
         if not hass.services.has_service(DOMAIN, SERVICE_DUMP_CATALOG):
@@ -219,6 +265,13 @@ async def async_register_services(hass) -> None:
                 _test_utterance,
                 schema=test_schema,
             )
+        if not hass.services.has_service(DOMAIN, SERVICE_TEST_UTTERANCE_TO_FILE):
+            hass.services.async_register(
+                DOMAIN,
+                SERVICE_TEST_UTTERANCE_TO_FILE,
+                _test_utterance_to_file,
+                schema=test_file_schema,
+            )
         if not hass.services.has_service(DOMAIN, SERVICE_DUMP_CATALOG):
             hass.services.async_register(
                 DOMAIN,
@@ -241,6 +294,7 @@ async def async_unregister_services(hass) -> None:
         SERVICE_REBUILD_CATALOG,
         SERVICE_GET_CATALOG_STATS,
         SERVICE_TEST_UTTERANCE,
+        SERVICE_TEST_UTTERANCE_TO_FILE,
         SERVICE_DUMP_CATALOG,
         SERVICE_DUMP_CATALOG_TO_FILE,
     ):

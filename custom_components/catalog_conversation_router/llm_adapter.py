@@ -30,6 +30,7 @@ class LLMAdapter:
         conversation_id: str | None,
         context: Any,
         origin_area: str | None = None,
+        preserve_raw_text: bool = False,
     ) -> LLMTranslationResult:
         """Ask LLM agent to output strict translation JSON."""
         prompt = self._build_translation_prompt(
@@ -61,9 +62,10 @@ class LLMAdapter:
 
         parsed = self._parse_translation_json(outcome.response_text)
 
-        # Prevent accidental speech/debug leakage from LLM output
-        # Only structured fields should propagate through the router
-        parsed.raw_text = None
+        # Prevent accidental speech/debug leakage from LLM output unless explicitly
+        # requested for a debug trace.
+        if not preserve_raw_text:
+            parsed.raw_text = None
 
         return parsed
 

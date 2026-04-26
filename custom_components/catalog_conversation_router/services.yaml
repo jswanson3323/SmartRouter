@@ -22,6 +22,41 @@ test_utterance:
       required: false
       selector:
         text:
+    execute_branches:
+      name: Execute branches
+      description: Optional. When true, actually call downstream local/LLM branches while still recording the full decision tree.
+      required: false
+      selector:
+        boolean:
+
+test_utterance_to_file:
+  name: Test utterance to file
+  description: Dry-run an utterance through the routing pipeline and write the full debug payload to a JSON file under /config.
+  fields:
+    text:
+      name: Text
+      description: User utterance to test.
+      required: true
+      selector:
+        text:
+    area:
+      name: Area override
+      description: Optional area name to use for area-aware matching during the dry run.
+      required: false
+      selector:
+        text:
+    execute_branches:
+      name: Execute branches
+      description: Optional. When true, actually call downstream local/LLM branches while still recording the full decision tree.
+      required: false
+      selector:
+        boolean:
+    path:
+      name: File name
+      description: Optional file name to write under /config. Defaults to catalog_router_test_utterance.json.
+      required: false
+      selector:
+        text:
 
 dump_catalog:
   name: Dump catalog

@@ -16,6 +16,7 @@ from .phonetics import normalize_text, phonetic_tokens, tokenize
 
 _LOGGER = logging.getLogger(__name__)
 SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
+SUPER_AREA_DIAGNOSTIC_AREAS = {"kitchen", "great room", "dining room"}
 
 
 def _entity_capabilities_from_domain(domain: str) -> list[str]:
@@ -204,7 +205,7 @@ class EntityCatalogSource:
         floor_reg = None
         label_reg = None
         label_lookup: dict[str, str] = {}
-        logged_area_label_diagnostic = False
+        logged_area_label_diagnostics: set[str] = set()
 
         try:
             from homeassistant.helpers import area_registry as ar
@@ -261,8 +262,12 @@ class EntityCatalogSource:
                 if area_reg is not None and entry.area_id:
                     area = area_reg.async_get_area(entry.area_id)
                     if area:
-                        if not logged_area_label_diagnostic:
-                            logged_area_label_diagnostic = True
+                        area_name_normalized = str(getattr(area, "name", "")).strip().lower()
+                        if (
+                            area_name_normalized in SUPER_AREA_DIAGNOSTIC_AREAS
+                            and area_name_normalized not in logged_area_label_diagnostics
+                        ):
+                            logged_area_label_diagnostics.add(area_name_normalized)
                             label_reg_attrs = {
                                 "type": type(label_reg).__name__ if label_reg is not None else None,
                                 "has_labels": hasattr(label_reg, "labels") if label_reg is not None else False,

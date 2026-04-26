@@ -448,8 +448,13 @@ class AgentRouter:
                 if isinstance(name, str) and name.strip():
                     label_lookup[str(label_id)] = name.strip()
 
-        def _extract_super_area_from_labels(raw_labels: Any) -> str | None:
-            for raw_label in raw_labels or []:
+        def _extract_super_area_from_labels(obj: Any) -> str | None:
+            raw_labels = (
+                getattr(obj, "labels", None)
+                or getattr(obj, "label_ids", None)
+                or []
+            )
+            for raw_label in raw_labels:
                 if hasattr(raw_label, "name"):
                     label_name = getattr(raw_label, "name", None)
                 elif isinstance(raw_label, str):
@@ -504,7 +509,7 @@ class AgentRouter:
             if area_id in seen_ids:
                 continue
             seen_ids.add(str(area_id))
-            super_area = _extract_super_area_from_labels(getattr(area, "labels", None))
+            super_area = _extract_super_area_from_labels(area)
             if super_area:
                 return super_area
 

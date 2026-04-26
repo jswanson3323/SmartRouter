@@ -1,6 +1,8 @@
 """Router pipeline tests."""
 
 import asyncio
+import sys
+import types
 
 from custom_components.catalog_conversation_router.agent_router import AgentRouter
 from custom_components.catalog_conversation_router.models import (
@@ -261,3 +263,55 @@ def test_conversation_pattern_is_rendered_for_assist_input() -> None:
     assert result.path.value == "fuzzy_local"
     assert result.trace.chosen_canonical_phrase == pattern
     assert result.trace.assist_pipeline_input == "how much time is left on my test timer"
+
+
+def test_origin_super_area_resolves_from_area_label_ids(monkeypatch) -> None:
+    area = types.SimpleNamespace(
+        id="area_kitchen",
+        name="Kitchen",
+        label_ids=["label_great_room"],
+    )
+    area_reg = types.SimpleNamespace(
+        _areas={"area_kitchen": area},
+        async_get_area=lambda area_id: area if area_id == "area_kitchen" else None,
+    )
+    device_reg = types.SimpleNamespace(
+        async_get=lambda device_id: types.SimpleNamespace(area_id="area_kitchen")
+        if device_id == "device1"
+        else None
+    )
+    entity_reg = types.SimpleNamespace(async_get=lambda entity_id: None)
+    label_reg = types.SimpleNamespace(
+        labels={"label_great_room": types.SimpleNamespace(name="SuperArea: Great Room")}
+    )
+
+    ar_mod = types.ModuleType("homeassistant.helpers.area_registry")
+    ar_mod.async_get = lambda _hass: area_reg
+    dr_mod = types.ModuleType("homeassistant.helpers.device_registry")
+    dr_mod.async_get = lambda _hass: device_reg
+    er_mod = types.ModuleType("homeassistant.helpers.entity_registry")
+    er_mod.async_get = lambda _hass: entity_reg
+    lr_mod = types.ModuleType("homeassistant.helpers.label_registry")
+    lr_mod.async_get = lambda _hass: label_reg
+
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.area_registry", ar_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", dr_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", er_mod)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.label_registry", lr_mod)
+
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=_FakeAgentAdapter([_outcome(True)]),
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=object(),
+    )
+
+    result = router._resolve_origin_super_area(
+        origin_area="Kitchen",
+        device_id="device1",
+        satellite_id=None,
+        context=types.SimpleNamespace(device_id=None),
+    )
+    assert result == "Great Room"

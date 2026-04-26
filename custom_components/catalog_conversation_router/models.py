@@ -177,6 +177,7 @@ class ResolutionTrace:
     exact_local_processed_locally: bool | None = None
     exact_local_executed: bool | None = None
     origin_area: str | None = None
+    origin_super_area: str | None = None
     effective_area_hint: str | None = None
     effective_super_area_hint: str | None = None
     failure_category: str | None = None

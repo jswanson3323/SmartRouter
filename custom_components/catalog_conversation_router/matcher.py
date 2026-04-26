@@ -152,7 +152,13 @@ class FuzzyMatcher:
             area_hint=area_hint,
         )
 
-    def match(self, utterance: str, catalog: Catalog, origin_area: str | None = None) -> MatchResult:
+    def match(
+        self,
+        utterance: str,
+        catalog: Catalog,
+        origin_area: str | None = None,
+        origin_super_area: str | None = None,
+    ) -> MatchResult:
         """Score entity and conversation target candidates."""
         normalized = normalize_text(utterance)
         parsed = self.parse_utterance(utterance)
@@ -166,6 +172,7 @@ class FuzzyMatcher:
         effective_super_area_hint = self._resolve_effective_super_area_hint(
             area_hint=effective_area_hint,
             entities=catalog.entity_targets,
+            explicit_super_area_hint=origin_super_area,
         )
         inferred_domain = self._infer_domain_from_tokens(utter_tokens)
         generic_domain_request = self._is_generic_domain_request(utter_tokens, inferred_domain)
@@ -390,6 +397,10 @@ class FuzzyMatcher:
                             0.15 if parsed.action in {"turn_on", "turn_off", "set", "open", "close", "lock", "unlock"} else 0.35,
                         )
                         score_detail["whole_target_similarity"] = min(score_detail["whole_target_similarity"], 0.25)
+                    if generic_domain_request and conversation_target_similarity == 0.0:
+                        score_detail["token_similarity"] = min(score_detail["token_similarity"], 0.18)
+                        score_detail["structure_similarity"] = min(score_detail["structure_similarity"], 0.18)
+                        score_detail["whole_target_similarity"] = min(score_detail["whole_target_similarity"], 0.18)
 
                 pattern_bonus, matched_slots, total_slots = self._conversation_pattern_bonus(
                     utterance_normalized=normalized,
@@ -470,6 +481,10 @@ class FuzzyMatcher:
                         score_detail["structure_similarity"],
                         0.35,
                     )
+                    if generic_domain_request:
+                        score_detail["token_similarity"] = min(score_detail["token_similarity"], 0.18)
+                        score_detail["structure_similarity"] = min(score_detail["structure_similarity"], 0.18)
+                        score_detail["whole_target_similarity"] = min(score_detail["whole_target_similarity"], 0.18)
 
             pattern_bonus, matched_slots, total_slots = self._conversation_pattern_bonus(
                 utterance_normalized=normalized,
@@ -976,8 +991,11 @@ class FuzzyMatcher:
         *,
         area_hint: str | None,
         entities: list[EntityTarget],
+        explicit_super_area_hint: str | None = None,
     ) -> str | None:
         """Infer the SuperArea for the active area from catalog entities."""
+        if explicit_super_area_hint:
+            return normalize_text(explicit_super_area_hint)
         if not area_hint:
             return None
 

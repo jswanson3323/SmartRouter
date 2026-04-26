@@ -478,3 +478,56 @@ def test_explicit_other_room_target_is_not_overridden_by_origin_area() -> None:
     assert result.best is not None
     assert result.best.candidate_id == "fan.gym_fan"
     assert result.best.canonical_phrase.lower() == "turn off gym fan"
+
+
+def test_generic_fan_request_prefers_entity_over_spa_conversation_target() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r8",
+            last_refreshed="now",
+            language="en",
+            entity_count=1,
+            conversation_target_count=1,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="fan.great_room_fan",
+                name="Great Room Fan",
+                normalized_name="great room fan",
+                aliases=[],
+                domain="fan",
+                area="Great Room",
+                super_area="Great Room",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["great", "room", "fan"],
+                phonetic_tokens=["G630", "R500", "F500"],
+            )
+        ],
+        conversation_targets=[
+            ConversationTarget(
+                target_id="manual:spa",
+                type="manual",
+                display_name="Spa Control",
+                normalized_name="spa control",
+                sample_phrases=["turn on the spa", "turn off the spa"],
+                canonical_phrase="turn on the spa",
+                source="manual",
+                slots=[],
+                tokens=["turn", "on", "spa"],
+                phonetic_tokens=["T650", "O500", "S100"],
+            )
+        ],
+    )
+    matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
+    result = matcher.match(
+        "turn on the fan",
+        catalog,
+        origin_area="Kitchen",
+        origin_super_area="Great Room",
+    )
+    assert result.best is not None
+    assert result.best.candidate_id == "fan.great_room_fan"
+    assert result.best.canonical_phrase.lower() == "turn on great room fan"

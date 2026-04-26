@@ -1,7 +1,7 @@
 """LLM translation parser tests."""
 
 from custom_components.catalog_conversation_router.llm_adapter import LLMAdapter
-from custom_components.catalog_conversation_router.models import Catalog, CatalogMetadata, EntityTarget
+from custom_components.catalog_conversation_router.models import Catalog, CatalogMetadata, ConversationTarget, EntityTarget
 
 
 class _FakeAgentAdapter:
@@ -94,3 +94,56 @@ def test_translation_prompt_includes_origin_area_context() -> None:
     assert "Origin SuperArea: 'Upstairs'" in prompt
     assert "Origin-area entity targets: ['Master Bedroom Light']" in prompt
     assert "Origin-SuperArea entity targets: ['Hall Light']" in prompt
+
+
+def test_invalid_llm_canonical_text_is_rejected_against_catalog() -> None:
+    adapter = LLMAdapter(_FakeAgentAdapter())
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r1",
+            last_refreshed="now",
+            language="en",
+            entity_count=1,
+            conversation_target_count=1,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="fan.great_room_fan",
+                name="Great Room Fan",
+                normalized_name="great room fan",
+                aliases=[],
+                domain="fan",
+                area="Great Room",
+                super_area="Great Room",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["great", "room", "fan"],
+                phonetic_tokens=["G630", "R500", "F500"],
+            )
+        ],
+        conversation_targets=[
+            ConversationTarget(
+                target_id="manual:movie",
+                type="manual",
+                display_name="movie mode",
+                normalized_name="movie mode",
+                sample_phrases=[],
+                canonical_phrase="activate movie mode",
+                source="manual",
+                slots=[],
+                tokens=["movie", "mode"],
+                phonetic_tokens=["M100", "M300"],
+            )
+        ],
+    )
+    result = adapter._validate_translation_result(
+        adapter._parse_translation_json(
+            '{"mode":"translate_for_local","canonical_text":"HassTurnOn","confidence":0.9,"target_type":"entity_command","notes":"bad"}'
+        ),
+        catalog,
+    )
+    assert result.valid is False
+    assert result.canonical_text is None
+    assert result.notes == "invalid_canonical_text"

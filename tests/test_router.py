@@ -32,7 +32,7 @@ class _FakeMatcher:
     def __init__(self, result):
         self._result = result
 
-    def match(self, text, catalog, origin_area=None):
+    def match(self, text, catalog, origin_area=None, origin_super_area=None):
         return self._result
 
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .catalog import CatalogManager
@@ -15,6 +16,7 @@ from .phonetics import normalize_text
 from .safety import validate_fuzzy_execution
 
 _LOGGER = logging.getLogger(__name__)
+SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
 
 
 class AgentRouter:
@@ -56,13 +58,25 @@ class AgentRouter:
         _LOGGER.warning("ROUTER INPUT: %r", text)
         catalog = self._catalog.get_catalog()
         resolved_origin_area = origin_area or self._resolve_origin_area(device_id=device_id, satellite_id=satellite_id, context=context)
-        match_result = self._matcher.match(text, catalog, origin_area=resolved_origin_area)
+        resolved_origin_super_area = self._resolve_origin_super_area(
+            origin_area=resolved_origin_area,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            context=context,
+        )
+        match_result = self._matcher.match(
+            text,
+            catalog,
+            origin_area=resolved_origin_area,
+            origin_super_area=resolved_origin_super_area,
+        )
         _LOGGER.warning("FUZZY MATCH: best=%s score=%s", getattr(match_result.best, "canonical_phrase", None), getattr(match_result.best, "score", None))
         trace = ResolutionTrace(
             original_utterance=text,
             normalized_utterance=match_result.normalized_utterance,
             catalog_revision=catalog.metadata.revision,
             origin_area=resolved_origin_area,
+            origin_super_area=resolved_origin_super_area,
             effective_area_hint=match_result.effective_area_hint,
             effective_super_area_hint=match_result.effective_super_area_hint,
         )
@@ -227,6 +241,7 @@ class AgentRouter:
                 conversation_id=conversation_id,
                 context=context,
                 origin_area=resolved_origin_area,
+                origin_super_area=resolved_origin_super_area,
                 preserve_raw_text=debug_collect_all,
             )
             _LOGGER.warning("LLM TRANSLATION: valid=%s canonical=%s mode=%s", translation.valid, translation.canonical_text, translation.mode)
@@ -400,5 +415,97 @@ class AgentRouter:
         area_name = _area_name_for_device_id(context_device_id)
         if area_name:
             return area_name
+
+        return None
+
+    def _resolve_origin_super_area(
+        self,
+        *,
+        origin_area: str | None,
+        device_id: str | None,
+        satellite_id: str | None,
+        context: Any,
+    ) -> str | None:
+        """Best-effort resolve SuperArea label for the utterance origin area."""
+        try:
+            from homeassistant.helpers import area_registry as ar
+            from homeassistant.helpers import device_registry as dr
+            from homeassistant.helpers import entity_registry as er
+            from homeassistant.helpers import label_registry as lr
+        except Exception:
+            return None
+
+        area_reg = ar.async_get(self._hass)
+        device_reg = dr.async_get(self._hass)
+        entity_reg = er.async_get(self._hass)
+        label_reg = lr.async_get(self._hass)
+
+        label_lookup = {}
+        labels = getattr(label_reg, "labels", None)
+        if isinstance(labels, dict):
+            for label_id, label in labels.items():
+                name = getattr(label, "name", None)
+                if isinstance(name, str) and name.strip():
+                    label_lookup[str(label_id)] = name.strip()
+
+        def _extract_super_area_from_labels(raw_labels: Any) -> str | None:
+            for raw_label in raw_labels or []:
+                if hasattr(raw_label, "name"):
+                    label_name = getattr(raw_label, "name", None)
+                elif isinstance(raw_label, str):
+                    label_name = label_lookup.get(raw_label, raw_label)
+                else:
+                    label_name = None
+                if not isinstance(label_name, str):
+                    continue
+                match = SUPER_AREA_LABEL_RE.match(label_name.strip())
+                if match and match.group(1).strip():
+                    return match.group(1).strip()
+            return None
+
+        def _area_for_device_id(candidate_device_id: str | None):
+            if not candidate_device_id:
+                return None
+            device = device_reg.async_get(candidate_device_id)
+            if device is None or not getattr(device, "area_id", None):
+                return None
+            return area_reg.async_get_area(device.area_id)
+
+        def _device_id_for_entity_id(entity_id: str | None) -> str | None:
+            if not entity_id:
+                return None
+            entry = entity_reg.async_get(entity_id)
+            return getattr(entry, "device_id", None) if entry else None
+
+        candidate_areas: list[Any] = []
+        registry_area_maps = []
+        for attr_name in ("areas", "_areas"):
+            raw = getattr(area_reg, attr_name, None)
+            if isinstance(raw, dict):
+                registry_area_maps.append(raw)
+        if origin_area:
+            for area_map in registry_area_maps:
+                for area in area_map.values():
+                    if getattr(area, "name", None) and str(area.name).strip().lower() == origin_area.strip().lower():
+                        candidate_areas.append(area)
+
+        for candidate_device_id in (
+            device_id,
+            _device_id_for_entity_id(satellite_id),
+            getattr(context, "device_id", None),
+        ):
+            area = _area_for_device_id(candidate_device_id)
+            if area is not None:
+                candidate_areas.append(area)
+
+        seen_ids: set[str] = set()
+        for area in candidate_areas:
+            area_id = getattr(area, "id", None) or getattr(area, "area_id", None) or str(id(area))
+            if area_id in seen_ids:
+                continue
+            seen_ids.add(str(area_id))
+            super_area = _extract_super_area_from_labels(getattr(area, "labels", None))
+            if super_area:
+                return super_area
 
         return None

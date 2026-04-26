@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+from .matcher import CANONICAL_ACTION_TEXT
 from .models import CandidateType, Catalog, LLMTranslationResult
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class LLMAdapter:
         conversation_id: str | None,
         context: Any,
         origin_area: str | None = None,
+        origin_super_area: str | None = None,
         preserve_raw_text: bool = False,
     ) -> LLMTranslationResult:
         """Ask LLM agent to output strict translation JSON."""
@@ -39,6 +41,7 @@ class LLMAdapter:
             catalog=catalog,
             max_candidates=max_candidates,
             origin_area=origin_area,
+            origin_super_area=origin_super_area,
         )
 
         outcome = await self._agent_adapter.async_process(
@@ -61,6 +64,8 @@ class LLMAdapter:
             )
 
         parsed = self._parse_translation_json(outcome.response_text)
+        parsed.raw_text = outcome.response_text
+        parsed = self._validate_translation_result(parsed, catalog)
 
         # Prevent accidental speech/debug leakage from LLM output unless explicitly
         # requested for a debug trace.
@@ -123,6 +128,7 @@ class LLMAdapter:
         catalog: Catalog,
         max_candidates: int,
         origin_area: str | None,
+        origin_super_area: str | None = None,
     ) -> str:
         entity_candidates = [e.name for e in catalog.entity_targets[:max_candidates]]
         conversation_candidates = [
@@ -135,7 +141,7 @@ class LLMAdapter:
             and e.area
             and origin_area.strip().lower() == e.area.strip().lower()
         ][:max_candidates]
-        origin_super_area = self._infer_super_area_from_origin_area(
+        origin_super_area = origin_super_area or self._infer_super_area_from_origin_area(
             origin_area=origin_area,
             catalog=catalog,
         )
@@ -198,6 +204,39 @@ class LLMAdapter:
         if len(matches) == 1:
             return next(iter(matches))
         return None
+
+    def _validate_translation_result(
+        self,
+        result: LLMTranslationResult,
+        catalog: Catalog,
+    ) -> LLMTranslationResult:
+        """Reject LLM canonical text that is not a known catalog command."""
+        if not result.valid or not result.canonical_text:
+            return result
+
+        valid_phrases: set[str] = {
+            target.canonical_phrase.strip().lower()
+            for target in catalog.conversation_targets
+            if target.canonical_phrase
+        }
+        for entity in catalog.entity_targets:
+            for capability in entity.capabilities:
+                prefix = CANONICAL_ACTION_TEXT.get(capability)
+                if not prefix:
+                    continue
+                if prefix == "what is":
+                    valid_phrases.add(f"what is {entity.name}".strip().lower())
+                else:
+                    valid_phrases.add(f"{prefix} {entity.name}".strip().lower())
+
+        if result.canonical_text.strip().lower() in valid_phrases:
+            return result
+
+        result.valid = False
+        result.mode = "fallback_answer"
+        result.notes = "invalid_canonical_text"
+        result.canonical_text = None
+        return result
 
     def _parse_translation_json(self, text: str) -> LLMTranslationResult:
         # First try strict JSON parsing (best case: model returned pure JSON)

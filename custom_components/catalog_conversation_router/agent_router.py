@@ -33,7 +33,14 @@ STATUS_QUERY_HINTS = (
 STATE_ENRICHMENT_INTRO = (
     "Router-resolved live state for this turn. "
     "Use this live state as the source of truth for the current answer. "
-    "Prefer these resolved entities over broader inferred context."
+    "Answer only about the resolved target or targets below. "
+    "Do not summarize unrelated rooms, devices, or the whole home. "
+    "Do not say you cannot see the live state if router-resolved live state is provided."
+)
+TEMPERATURE_WORD_RE = re.compile(r"\btemp(?:e?r?a?t?u?r?e|urature|rature)?\b", re.IGNORECASE)
+BINARY_STATE_ENDING_RE = re.compile(
+    r"\b(on|off|open|opened|closed|close|locked|unlocked)\b\s*\??$",
+    re.IGNORECASE,
 )
 
 
@@ -128,23 +135,14 @@ class AgentRouter:
                 "notes": "active_llm_conversation",
             }
             trace.llm_translated_local_executed = False
-            llm_system_prompt = extra_system_prompt
-            state_enrichment = self._build_llm_state_enrichment(
+            llm_system_prompt = self._apply_state_enrichment(
+                trace=trace,
                 text=text,
                 catalog=catalog,
                 origin_area=resolved_origin_area,
                 origin_super_area=resolved_origin_super_area,
+                extra_system_prompt=extra_system_prompt,
             )
-            if state_enrichment:
-                trace.llm_state_enrichment_applied = True
-                trace.llm_state_enrichment_targets = state_enrichment["targets"]
-                trace.llm_state_enrichment_prompt = state_enrichment["prompt"]
-                llm_system_prompt = self._merge_system_prompts(
-                    extra_system_prompt,
-                    state_enrichment["prompt"],
-                )
-            else:
-                trace.llm_state_enrichment_applied = False
             if self._config.llm_fallback_enabled:
                 if _should_execute_branch():
                     llm_outcome = await self._llm_adapter.async_final_fallback(
@@ -518,6 +516,14 @@ class AgentRouter:
         if self._config.llm_fallback_enabled:
             if _should_execute_branch():
                 _LOGGER.debug("ROUTER DECISION: LLM_FALLBACK (calling LLM)")
+                llm_system_prompt = self._apply_state_enrichment(
+                    trace=trace,
+                    text=text,
+                    catalog=catalog,
+                    origin_area=resolved_origin_area,
+                    origin_super_area=resolved_origin_super_area,
+                    extra_system_prompt=extra_system_prompt,
+                )
                 llm_outcome = await self._llm_adapter.async_final_fallback(
                     llm_agent_id=self._config.llm_agent_id,
                     utterance=text,
@@ -526,7 +532,7 @@ class AgentRouter:
                     context=context,
                     device_id=device_id,
                     satellite_id=satellite_id,
-                    extra_system_prompt=extra_system_prompt,
+                    extra_system_prompt=llm_system_prompt,
                 )
             else:
                 llm_outcome = None
@@ -594,6 +600,33 @@ class AgentRouter:
         else:
             self._active_conversations.pop(conversation_id, None)
 
+    def _apply_state_enrichment(
+        self,
+        *,
+        trace: ResolutionTrace,
+        text: str,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+        extra_system_prompt: str | None,
+    ) -> str | None:
+        state_enrichment = self._build_llm_state_enrichment(
+            text=text,
+            catalog=catalog,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if state_enrichment:
+            trace.llm_state_enrichment_applied = True
+            trace.llm_state_enrichment_targets = state_enrichment["targets"]
+            trace.llm_state_enrichment_prompt = state_enrichment["prompt"]
+            return self._merge_system_prompts(extra_system_prompt, state_enrichment["prompt"])
+
+        trace.llm_state_enrichment_applied = False
+        trace.llm_state_enrichment_targets = []
+        trace.llm_state_enrichment_prompt = None
+        return extra_system_prompt
+
     def _build_llm_state_enrichment(
         self,
         *,
@@ -606,19 +639,29 @@ class AgentRouter:
         if self._hass is None or not self._looks_like_status_followup(text):
             return None
 
+        query_kind = self._classify_enrichment_query(text)
         resolved = self._resolve_state_enrichment_entities(
             text=text,
             catalog=catalog,
             origin_area=origin_area,
             origin_super_area=origin_super_area,
+            query_kind=query_kind,
         )
         if not resolved:
             return None
 
         lines: list[str] = [STATE_ENRICHMENT_INTRO]
+        if query_kind == "binary":
+            lines.append(
+                "For yes/no state questions, answer whether the requested state is true or false using the resolved live state below."
+            )
+        elif query_kind == "temperature":
+            lines.append(
+                "For temperature questions, answer with the current temperature only. Prefer current temperature over target or set temperature."
+            )
         target_names: list[str] = []
         for entity in resolved:
-            rendered = self._render_entity_live_state(entity)
+            rendered = self._render_entity_live_state(entity, query_kind=query_kind)
             if not rendered:
                 continue
             lines.append(f"- {rendered}")
@@ -636,11 +679,20 @@ class AgentRouter:
         normalized = normalize_text(text)
         if not normalized:
             return False
+        normalized = self._normalize_temperature_text(normalized)
         if any(normalized.startswith(prefix) for prefix in STATUS_QUERY_HINTS):
             return True
         if any(token in normalized.split() for token in ("light", "lights", "fan", "temperature", "temp", "thermostat", "lock", "door", "cover")):
             return True
         return len(normalized.split()) <= 6
+
+    def _classify_enrichment_query(self, text: str) -> str:
+        normalized = self._normalize_temperature_text(normalize_text(text))
+        if "temperature" in normalized.split() or "temp" in normalized.split():
+            return "temperature"
+        if normalized.startswith("is ") or normalized.startswith("are "):
+            return "binary"
+        return "status"
 
     def _resolve_state_enrichment_entities(
         self,
@@ -649,8 +701,9 @@ class AgentRouter:
         catalog,
         origin_area: str | None,
         origin_super_area: str | None,
+        query_kind: str,
     ) -> list[EntityTarget]:
-        segments = self._extract_enrichment_segments(text)
+        segments = self._extract_enrichment_segments(text, query_kind=query_kind)
         if not segments:
             return []
 
@@ -662,6 +715,7 @@ class AgentRouter:
                 entities=catalog.entity_targets,
                 origin_area=origin_area,
                 origin_super_area=origin_super_area,
+                query_kind=query_kind,
             )
             if entity is None or entity.entity_id in used_ids:
                 continue
@@ -671,8 +725,11 @@ class AgentRouter:
                 break
         return resolved
 
-    def _extract_enrichment_segments(self, text: str) -> list[str]:
-        normalized = normalize_text(text)
+    def _extract_enrichment_segments(self, text: str, *, query_kind: str) -> list[str]:
+        normalized = self._normalize_temperature_text(normalize_text(text))
+        if query_kind == "binary":
+            normalized = re.sub(r"^(is|are)\s+", "", normalized).strip()
+            normalized = BINARY_STATE_ENDING_RE.sub("", normalized).strip()
         for prefix in (
             "can you tell me about ",
             "tell me about ",
@@ -685,6 +742,11 @@ class AgentRouter:
             if normalized.startswith(prefix):
                 normalized = normalized.removeprefix(prefix).strip()
                 break
+        if query_kind == "temperature":
+            normalized = re.sub(r"^(what is|whats)\s+", "", normalized).strip()
+            normalized = re.sub(r"\btemperature\b", "", normalized).strip()
+            normalized = re.sub(r"\btemp\b", "", normalized).strip()
+            normalized = re.sub(r"^(in|at|for)\s+", "", normalized).strip()
 
         normalized = re.sub(r"\b(can you|could you|please)\b", " ", normalized)
         normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -712,8 +774,9 @@ class AgentRouter:
         entities: list[EntityTarget],
         origin_area: str | None,
         origin_super_area: str | None,
+        query_kind: str,
     ) -> EntityTarget | None:
-        segment_normalized = normalize_text(segment)
+        segment_normalized = self._normalize_temperature_text(normalize_text(segment))
         segment_tokens = tokenize(segment_normalized)
         if not segment_tokens:
             return None
@@ -726,6 +789,7 @@ class AgentRouter:
                 entity=entity,
                 origin_area=origin_area,
                 origin_super_area=origin_super_area,
+                query_kind=query_kind,
             )
             if score is None:
                 continue
@@ -757,13 +821,17 @@ class AgentRouter:
         entity: EntityTarget,
         origin_area: str | None,
         origin_super_area: str | None,
+        query_kind: str,
     ) -> float | None:
         entity_tokens = entity.tokens
         if not entity_tokens:
             return None
 
+        if query_kind == "temperature" and not self._entity_supports_temperature(entity):
+            return None
+
         overlap = len(set(segment_tokens) & set(entity_tokens))
-        if overlap == 0:
+        if overlap == 0 and query_kind != "temperature":
             return None
 
         token_coverage = overlap / max(1, len(set(segment_tokens)))
@@ -788,6 +856,9 @@ class AgentRouter:
         ) == 1:
             score += 0.03
 
+        if query_kind == "temperature":
+            score += self._temperature_entity_bonus(entity)
+
         return min(score, 1.0)
 
     def _entity_locality_rank(
@@ -807,7 +878,7 @@ class AgentRouter:
             return 1
         return 0
 
-    def _render_entity_live_state(self, entity: EntityTarget) -> str | None:
+    def _render_entity_live_state(self, entity: EntityTarget, *, query_kind: str) -> str | None:
         states = getattr(self._hass, "states", None)
         if states is None or not hasattr(states, "get"):
             return None
@@ -822,6 +893,8 @@ class AgentRouter:
             return None
 
         summary = f"{entity.name}: {value}"
+        if query_kind == "temperature":
+            return self._render_temperature_live_state(entity, state)
         if entity.domain == "climate":
             current_temp = attrs.get("current_temperature")
             unit = attrs.get("temperature_unit")
@@ -837,6 +910,41 @@ class AgentRouter:
         elif entity.domain in {"light", "switch", "fan", "lock", "cover"}:
             summary = f"{entity.name}: {value}"
         return summary
+
+    def _render_temperature_live_state(self, entity: EntityTarget, state: Any) -> str | None:
+        attrs = getattr(state, "attributes", {}) or {}
+        value = getattr(state, "state", None)
+        if entity.domain == "climate":
+            current_temp = attrs.get("current_temperature")
+            unit = attrs.get("temperature_unit")
+            if current_temp is None:
+                return None
+            return f"{entity.name}: current temperature {current_temp}{unit or ''}"
+        unit = attrs.get("unit_of_measurement")
+        if value is None:
+            return None
+        if unit:
+            return f"{entity.name}: {value}{unit}"
+        return f"{entity.name}: {value}"
+
+    def _entity_supports_temperature(self, entity: EntityTarget) -> bool:
+        if entity.domain == "climate":
+            return True
+        tokens = set(entity.tokens)
+        return "temperature" in tokens or "temp" in tokens
+
+    def _temperature_entity_bonus(self, entity: EntityTarget) -> float:
+        tokens = set(entity.tokens)
+        if entity.domain == "climate":
+            return 0.25
+        if "temperature" in tokens:
+            return 0.20
+        if "temp" in tokens:
+            return 0.18
+        return 0.0
+
+    def _normalize_temperature_text(self, text: str) -> str:
+        return TEMPERATURE_WORD_RE.sub("temperature", text)
 
     def _merge_system_prompts(
         self,

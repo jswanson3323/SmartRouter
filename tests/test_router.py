@@ -530,6 +530,109 @@ def test_active_llm_state_enrichment_prefers_origin_area() -> None:
     assert "Hall Light: off" not in prompt
 
 
+def test_first_turn_llm_state_enrichment_applies_for_temperature_query() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target(
+            "climate.great_room_thermostat",
+            "Great Room Thermostat",
+            domain="climate",
+            area="Great Room",
+        ),
+        _entity_target(
+            "sensor.great_room_temperature",
+            "Great Room Thermostat Temperature",
+            domain="sensor",
+            area="Great Room",
+        ),
+    ]
+    llm_adapter = _FakeLLMAdapter(_Translation(False, None), _outcome(True, "The temperature is 76 F."))
+    hass = types.SimpleNamespace(
+        states=_FakeStates(
+            {
+                "climate.great_room_thermostat": types.SimpleNamespace(
+                    state="heat_cool",
+                    attributes={"current_temperature": 76, "temperature_unit": "°F"},
+                ),
+                "sensor.great_room_temperature": types.SimpleNamespace(
+                    state="76.1",
+                    attributes={"unit_of_measurement": "°F"},
+                ),
+            }
+        )
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=hass,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="What is the tempurature in the great room?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    prompt = llm_adapter.fallback_calls[-1]["extra_system_prompt"]
+    assert "current temperature" in prompt
+    assert "Answer only about the resolved target or targets below." in prompt
+    assert result.trace.llm_state_enrichment_applied is True
+
+
+def test_active_llm_state_enrichment_handles_binary_state_query() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target("light.office", "Office Light", domain="light", area="Office"),
+    ]
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _conversation_result_outcome(True, "The office light is on.", continue_conversation=True),
+    )
+    hass = types.SimpleNamespace(
+        states=_FakeStates(
+            {
+                "light.office": types.SimpleNamespace(state="on", attributes={}),
+            }
+        )
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=hass,
+    )
+    router._active_conversations["outer-binary-1"] = types.SimpleNamespace(
+        outer_conversation_id="outer-binary-1",
+        executor_type="llm",
+        agent_id="llm",
+        downstream_conversation_id="downstream-conv-1",
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="Is the office light on?",
+            language="en",
+            conversation_id="outer-binary-1",
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    prompt = llm_adapter.fallback_calls[-1]["extra_system_prompt"]
+    assert "Office Light: on" in prompt
+    assert "answer whether the requested state is true or false" in prompt.lower()
+    assert result.trace.llm_state_enrichment_applied is True
+
+
 def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None:
     match = _MatchResult(best=_Candidate("turn on gym fan"), top=[_Candidate("turn on gym fan")])
     matcher = _FakeMatcher(match)

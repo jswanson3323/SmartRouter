@@ -627,7 +627,7 @@ def test_active_llm_state_enrichment_handles_binary_state_query() -> None:
     )
 
     assert result.path.value == "local_state_query"
-    assert router._agent_adapter.calls[-1]["text"] == "is the Office Light on"
+    assert router._agent_adapter.calls[-1]["text"] == "what is the state of Office Light"
     assert llm_adapter.fallback_calls == []
     assert result.trace.state_query_detected is True
     assert result.trace.state_query_kind == "binary"
@@ -666,7 +666,7 @@ def test_fuzzy_state_query_recovers_line_to_light() -> None:
     )
 
     assert result.path.value == "local_state_query"
-    assert agent_adapter.calls[-1]["text"] == "is the Office Light on"
+    assert agent_adapter.calls[-1]["text"] == "what is the state of Office Light"
     assert result.trace.state_query_fuzzy_match_target == "Office Light"
 
 
@@ -721,6 +721,33 @@ def test_active_llm_owner_preserved_after_local_state_query() -> None:
     )
     assert second.path.value == "llm_fallback"
     assert llm_adapter.fallback_calls[-1]["conversation_id"] == "downstream-conv-1"
+
+
+def test_area_domain_state_query_intercepts_to_local_agent() -> None:
+    agent_adapter = _FakeAgentAdapter([_outcome(True, "Cabinet Lights and Kitchen Sink Light")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="What lights are on in the kitchen?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "local_state_query"
+    assert agent_adapter.calls[-1]["text"] == "what lights are on in kitchen"
+    assert result.trace.state_query_detected is True
+    assert result.trace.state_query_kind == "domain_state"
+    assert result.trace.state_query_target_phrase == "kitchen"
 
 
 def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None:

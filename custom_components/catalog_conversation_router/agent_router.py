@@ -51,6 +51,10 @@ BINARY_STATE_ENDING_RE = re.compile(
     r"\b(on|off|open|opened|closed|close|locked|unlocked)\b\s*\??$",
     re.IGNORECASE,
 )
+DOMAIN_STATE_QUERY_RE = re.compile(
+    r"^(what|which)\s+([a-z_ ]+?)\s+are\s+(on|off|open|opened|closed|close|locked|unlocked)\s+(?:in|at|of)\s+(.+?)\??$",
+    re.IGNORECASE,
+)
 HA_QUERY_OPENERS = (
     "what is",
     "whats",
@@ -679,6 +683,38 @@ class AgentRouter:
         trace.state_query_target_phrase = parsed.target_phrase
         trace.state_query_requested_state = parsed.requested_state
 
+        if parsed.query_kind == "domain_state":
+            canonical_text = self._render_local_state_query(parsed=parsed, resolved=None)
+            if not canonical_text:
+                return None
+            trace.state_query_canonical_text = canonical_text
+            local_outcome = await self._agent_adapter.async_process(
+                agent_id=self._config.local_agent_id,
+                text=canonical_text,
+                language=language,
+                conversation_id=None if preserve_llm_owner else conversation_id,
+                context=context,
+                device_id=device_id,
+                satellite_id=satellite_id,
+                extra_system_prompt=extra_system_prompt,
+            )
+            trace.state_query_local_executed = True
+            trace.state_query_local_response_text = local_outcome.response_text
+            if not preserve_llm_owner:
+                self._update_conversation_tracking(
+                    conversation_id,
+                    local_outcome,
+                    executor="local",
+                    agent_id=self._config.local_agent_id,
+                )
+            if not local_outcome.success:
+                return None
+            return RouterResult(
+                path=ResolutionPath.LOCAL_STATE_QUERY,
+                outcome=local_outcome,
+                trace=trace,
+            )
+
         resolved = self._resolve_state_query_target(
             parsed=parsed,
             entities=catalog.entity_targets,
@@ -824,6 +860,16 @@ class AgentRouter:
                 target_phrase=target,
                 requested_state=binary_match.group(3),
                 normalized_text=normalized,
+            )
+
+        domain_state_match = DOMAIN_STATE_QUERY_RE.match(normalized)
+        if domain_state_match:
+            return ParsedStateQuery(
+                query_kind="domain_state",
+                target_phrase=re.sub(r"^(the|a|an)\s+", "", domain_state_match.group(4)).strip(),
+                requested_state=domain_state_match.group(3),
+                normalized_text=normalized,
+                domain_hint=domain_state_match.group(2).strip(),
             )
 
         if "temperature" in normalized.split() or "temp" in normalized.split() or re.search(r"\bhow (hot|cold|warm|cool)\b", normalized):
@@ -1020,14 +1066,22 @@ class AgentRouter:
         self,
         *,
         parsed: ParsedStateQuery,
-        resolved: dict[str, Any],
+        resolved: dict[str, Any] | None,
     ) -> str | None:
+        if parsed.query_kind == "domain_state":
+            domain_text = parsed.domain_hint or "devices"
+            state_text = parsed.requested_state or "on"
+            return f"what {domain_text} are {state_text} in {parsed.target_phrase}"
+
+        if resolved is None:
+            return None
+
         if resolved["kind"] == "area" and parsed.query_kind == "temperature":
             return f"what is the current temperature in {resolved['area']}"
 
         entity: EntityTarget = resolved["entity"]
         if parsed.query_kind == "binary" and parsed.requested_state:
-            return f"is the {entity.name} {parsed.requested_state}"
+            return f"what is the state of {entity.name}"
         if parsed.query_kind == "temperature":
             if entity.area and parsed.target_phrase == normalize_text(entity.area):
                 return f"what is the current temperature in {entity.area}"

@@ -275,6 +275,7 @@ class ParsedStateQuery:
     target_phrase: str
     requested_state: str | None
     normalized_text: str
+    domain_hint: str | None = None
 
 
 @dataclass(slots=True)

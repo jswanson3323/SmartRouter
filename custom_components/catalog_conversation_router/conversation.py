@@ -50,12 +50,13 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
         """Process a conversation input."""
         _LOGGER.debug(
-            "CONVERSATION ENTRY: text=%r language=%r conversation_id=%r device_id=%r satellite_id=%r",
+            "CONVERSATION ENTRY: text=%r language=%r conversation_id=%r device_id=%r satellite_id=%r extra_system_prompt=%r",
             user_input.text,
             user_input.language,
             user_input.conversation_id,
             getattr(user_input, "device_id", None),
             getattr(user_input, "satellite_id", None),
+            getattr(user_input, "extra_system_prompt", None),
         )
         result: RouterResult = await self._router.async_route(
             text=user_input.text,
@@ -65,6 +66,7 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
             dry_run=False,
             device_id=getattr(user_input, "device_id", None),
             satellite_id=getattr(user_input, "satellite_id", None),
+            extra_system_prompt=getattr(user_input, "extra_system_prompt", None),
         )
 
         if result.trace:

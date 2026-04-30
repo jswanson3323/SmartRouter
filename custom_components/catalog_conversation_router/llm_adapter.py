@@ -82,6 +82,9 @@ class LLMAdapter:
         language: str,
         conversation_id: str | None,
         context: Any,
+        device_id: str | None = None,
+        satellite_id: str | None = None,
+        extra_system_prompt: str | None = None,
     ):
         """Final direct LLM handling."""
         outcome = await self._agent_adapter.async_process(
@@ -90,6 +93,9 @@ class LLMAdapter:
             language=language,
             conversation_id=conversation_id,
             context=context,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=extra_system_prompt,
         )
 
         if outcome.response_text:

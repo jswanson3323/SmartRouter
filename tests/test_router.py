@@ -33,16 +33,26 @@ class _FakeCatalogManager:
 class _FakeMatcher:
     def __init__(self, result):
         self._result = result
+        self.calls = []
 
     def match(self, text, catalog, origin_area=None, origin_super_area=None):
+        self.calls.append(
+            {
+                "text": text,
+                "origin_area": origin_area,
+                "origin_super_area": origin_super_area,
+            }
+        )
         return self._result
 
 
 class _FakeAgentAdapter:
     def __init__(self, outcomes):
         self._outcomes = outcomes
+        self.calls = []
 
     async def async_process(self, **kwargs):
+        self.calls.append(kwargs)
         return self._outcomes.pop(0)
 
 
@@ -50,11 +60,15 @@ class _FakeLLMAdapter:
     def __init__(self, translation, fallback_outcome):
         self._translation = translation
         self._fallback_outcome = fallback_outcome
+        self.translate_calls = []
+        self.fallback_calls = []
 
     async def async_translate_for_local(self, **kwargs):
+        self.translate_calls.append(kwargs)
         return self._translation
 
     async def async_final_fallback(self, **kwargs):
+        self.fallback_calls.append(kwargs)
         return self._fallback_outcome
 
 
@@ -114,6 +128,39 @@ def _outcome(success, text="ok"):
         response_text=text,
         failure_category=None,
         raw={},
+    )
+
+
+def _conversation_result_outcome(success, text="ok", *, continue_conversation=False):
+    response = types.SimpleNamespace(
+        conversation_id="conv-1",
+        continue_conversation=continue_conversation,
+        response=types.SimpleNamespace(response_type="query_answer"),
+    )
+    return LocalAgentOutcome(
+        success=success,
+        response=response,
+        response_text=text,
+        failure_category=None,
+        raw=response,
+        processed_locally=False,
+    )
+
+
+def _local_conversation_result_outcome(success, text="ok", *, continue_conversation=False):
+    response = types.SimpleNamespace(
+        conversation_id="conv-2",
+        continue_conversation=continue_conversation,
+        response=types.SimpleNamespace(response_type="query_answer"),
+        processed_locally=True,
+    )
+    return LocalAgentOutcome(
+        success=success,
+        response=response,
+        response_text=text,
+        failure_category=None,
+        raw=response,
+        processed_locally=True,
     )
 
 
@@ -233,23 +280,136 @@ def test_area_scoped_ambiguity_still_executes_locally() -> None:
 
 def test_final_fallback_path() -> None:
     match = _MatchResult(best=None, top=[])
+    llm_adapter = _FakeLLMAdapter(_Translation(False, None), _outcome(True, "llm answer"))
     router = AgentRouter(
         config=_config(),
         catalog_manager=_FakeCatalogManager(),
         matcher=_FakeMatcher(match),
         agent_adapter=_FakeAgentAdapter([_outcome(False)]),
-        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True, "llm answer")),
+        llm_adapter=llm_adapter,
         hass=None,
     )
     result = asyncio.run(
         router.async_route(
             text="complex question",
             language="en",
-            conversation_id=None,
+            conversation_id="conv-1",
             context=None,
+            device_id="device-123",
+            satellite_id="assist_satellite.kitchen",
+            extra_system_prompt="You are assisting from the kitchen satellite.",
         )
     )
     assert result.path.value == "llm_fallback"
+    assert llm_adapter.fallback_calls[-1]["conversation_id"] == "conv-1"
+    assert llm_adapter.fallback_calls[-1]["device_id"] == "device-123"
+    assert llm_adapter.fallback_calls[-1]["satellite_id"] == "assist_satellite.kitchen"
+    assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] == "You are assisting from the kitchen satellite."
+
+
+def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
+    match = _MatchResult(best=_Candidate("turn on kitchen light"), top=[_Candidate("turn on kitchen light")])
+    matcher = _FakeMatcher(match)
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _conversation_result_outcome(True, "For how long?", continue_conversation=True),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=matcher,
+        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    first = asyncio.run(
+        router.async_route(
+            text="set a timer",
+            language="en",
+            conversation_id="conv-1",
+            context=None,
+        )
+    )
+    assert first.path.value == "llm_fallback"
+    assert matcher.calls
+
+    matcher.calls.clear()
+    llm_adapter._fallback_outcome = _conversation_result_outcome(
+        True, "Timer set for ten minutes.", continue_conversation=False
+    )
+    second = asyncio.run(
+        router.async_route(
+            text="ten minutes",
+            language="en",
+            conversation_id="conv-1",
+            context=None,
+            device_id="device-123",
+            satellite_id="assist_satellite.kitchen",
+            extra_system_prompt="You are assisting from the kitchen satellite.",
+        )
+    )
+
+    assert second.path.value == "llm_fallback"
+    assert matcher.calls == []
+    assert llm_adapter.fallback_calls[-1]["conversation_id"] == "conv-1"
+    assert llm_adapter.fallback_calls[-1]["device_id"] == "device-123"
+    assert llm_adapter.fallback_calls[-1]["satellite_id"] == "assist_satellite.kitchen"
+    assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] == "You are assisting from the kitchen satellite."
+    assert second.trace.llm_translation_summary is not None
+    assert second.trace.llm_translation_summary["notes"] == "active_llm_conversation"
+
+
+def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None:
+    match = _MatchResult(best=_Candidate("turn on gym fan"), top=[_Candidate("turn on gym fan")])
+    matcher = _FakeMatcher(match)
+    agent_adapter = _FakeAgentAdapter(
+        [
+            _local_conversation_result_outcome(True, "What temp?", continue_conversation=True),
+            _local_conversation_result_outcome(True, "Hot tub set to 99.", continue_conversation=False),
+        ]
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=matcher,
+        agent_adapter=agent_adapter,
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=None,
+    )
+
+    first = asyncio.run(
+        router.async_route(
+            text="turn on the hot tub",
+            language="en",
+            conversation_id="conv-2",
+            context=None,
+        )
+    )
+    assert first.path.value == "exact_local"
+    assert matcher.calls
+
+    matcher.calls.clear()
+    second = asyncio.run(
+        router.async_route(
+            text="99",
+            language="en",
+            conversation_id="conv-2",
+            context=None,
+            device_id="device-123",
+            satellite_id="assist_satellite.spa",
+            extra_system_prompt="You are assisting from the spa satellite.",
+        )
+    )
+
+    assert second.path.value == "exact_local"
+    assert matcher.calls == []
+    assert agent_adapter.calls[-1]["conversation_id"] == "conv-2"
+    assert agent_adapter.calls[-1]["device_id"] == "device-123"
+    assert agent_adapter.calls[-1]["satellite_id"] == "assist_satellite.spa"
+    assert agent_adapter.calls[-1]["extra_system_prompt"] == "You are assisting from the spa satellite."
+    assert second.trace.llm_translation_summary is not None
+    assert second.trace.llm_translation_summary["notes"] == "active_local_conversation"
 
 
 def test_conversation_pattern_is_rendered_for_assist_input() -> None:

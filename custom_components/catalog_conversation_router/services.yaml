@@ -8,7 +8,7 @@ get_catalog_stats:
 
 test_utterance:
   name: Test utterance
-  description: Dry-run an utterance through the routing pipeline without executing actions.
+  description: Dry-run an utterance through the routing pipeline and return the full decision trace without writing a file.
   fields:
     text:
       name: Text
@@ -18,20 +18,20 @@ test_utterance:
         text:
     area:
       name: Area override
-      description: Optional area name to use for area-aware matching during the dry run.
+      description: Optional area name to use for area-aware and SuperArea-aware matching during the dry run.
       required: false
       selector:
         text:
     execute_branches:
       name: Execute branches
-      description: Optional. When true, actually call downstream local/LLM branches while still recording the full decision tree.
+      description: Optional. When true, actually call downstream local and LLM branches while still recording the full decision tree.
       required: false
       selector:
         boolean:
 
 test_utterance_to_file:
   name: Test utterance to file
-  description: Dry-run an utterance through the routing pipeline and write the full debug payload to a JSON file under /config.
+  description: Preferred debugging service. Dry-run an utterance through the routing pipeline and write the full decision trace to a JSON file under /config.
   fields:
     text:
       name: Text
@@ -41,13 +41,13 @@ test_utterance_to_file:
         text:
     area:
       name: Area override
-      description: Optional area name to use for area-aware matching during the dry run.
+      description: Optional area name to use for area-aware and SuperArea-aware matching during the dry run.
       required: false
       selector:
         text:
     execute_branches:
       name: Execute branches
-      description: Optional. When true, actually call downstream local/LLM branches while still recording the full decision tree.
+      description: Optional. When true, actually call downstream local and LLM branches while still recording the full decision tree.
       required: false
       selector:
         boolean:

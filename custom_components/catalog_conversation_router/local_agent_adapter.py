@@ -26,6 +26,7 @@ class AgentAdapter:
         context: Any,
         device_id: str | None = None,
         satellite_id: str | None = None,
+        extra_system_prompt: str | None = None,
     ) -> LocalAgentOutcome:
         """Process text through a target agent."""
         resolved_agent_id = None if agent_id in {"homeassistant", "__default__", "default"} else agent_id
@@ -55,6 +56,8 @@ class AgentAdapter:
                 converse_kwargs["device_id"] = device_id
             if satellite_id is not None:
                 converse_kwargs["satellite_id"] = satellite_id
+            if extra_system_prompt is not None:
+                converse_kwargs["extra_system_prompt"] = extra_system_prompt
 
             response = await conversation.async_converse(**converse_kwargs)
             _LOGGER.debug("FULL LOCAL RESPONSE OBJECT: %r", response)

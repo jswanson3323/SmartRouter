@@ -17,7 +17,6 @@ from .phonetics import normalize_text, phonetic_tokens, tokenize
 _LOGGER = logging.getLogger(__name__)
 SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
 SUPER_AREA_LABEL_ID_RE = re.compile(r"^superarea[_\-\s]+(.+)$", re.IGNORECASE)
-SUPER_AREA_DIAGNOSTIC_AREAS = {"kitchen", "great room", "dining room"}
 
 
 def _entity_capabilities_from_domain(domain: str) -> list[str]:
@@ -225,8 +224,6 @@ class EntityCatalogSource:
         floor_reg = None
         label_reg = None
         label_lookup: dict[str, str] = {}
-        logged_area_label_diagnostics: set[str] = set()
-
         try:
             from homeassistant.helpers import area_registry as ar
             from homeassistant.helpers import device_registry as dr
@@ -282,31 +279,6 @@ class EntityCatalogSource:
                 if area_reg is not None and entry.area_id:
                     area = area_reg.async_get_area(entry.area_id)
                     if area:
-                        area_name_normalized = str(getattr(area, "name", "")).strip().lower()
-                        if (
-                            area_name_normalized in SUPER_AREA_DIAGNOSTIC_AREAS
-                            and area_name_normalized not in logged_area_label_diagnostics
-                        ):
-                            logged_area_label_diagnostics.add(area_name_normalized)
-                            label_reg_attrs = {
-                                "type": type(label_reg).__name__ if label_reg is not None else None,
-                                "has_labels": hasattr(label_reg, "labels") if label_reg is not None else False,
-                                "has__labels": hasattr(label_reg, "_labels") if label_reg is not None else False,
-                                "has_async_get_label": hasattr(label_reg, "async_get_label") if label_reg is not None else False,
-                                "labels_type": type(getattr(label_reg, "labels", None)).__name__ if label_reg is not None and getattr(label_reg, "labels", None) is not None else None,
-                                "_labels_type": type(getattr(label_reg, "_labels", None)).__name__ if label_reg is not None and getattr(label_reg, "_labels", None) is not None else None,
-                            }
-                            _LOGGER.warning(
-                                "SuperArea diagnostic: area_id=%s area_name=%s area_labels=%r area_label_ids=%r label_reg_attrs=%r label_lookup_keys=%s extracted_names=%r extracted_super_area=%r",
-                                entry.area_id,
-                                getattr(area, "name", None),
-                                getattr(area, "labels", None),
-                                getattr(area, "label_ids", None),
-                                label_reg_attrs,
-                                sorted(label_lookup.keys()),
-                                _label_names_from_registry_object(area, label_lookup, label_reg),
-                                _extract_super_area(_label_names_from_registry_object(area, label_lookup, label_reg)),
-                            )
                         area_lookup[entry.entity_id] = area.name
                         area_super_area = _extract_super_area(
                             _label_names_from_registry_object(area, label_lookup, label_reg)

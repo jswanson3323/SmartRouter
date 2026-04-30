@@ -1,66 +1,138 @@
 # Catalog Conversation Router
 
-`catalog_conversation_router` is a Home Assistant custom integration that provides a custom conversation agent with local-first routing, catalog-grounded fuzzy correction, optional LLM translation, and final LLM fallback.
+`catalog_conversation_router` is a Home Assistant custom integration that routes conversation requests through a local-first, catalog-grounded pipeline.
 
-## What It Does
+It is designed to make voice control more tolerant of:
+- ASR mistakes
+- partial targets like `turn on the light`
+- area-aware resolution from satellites/devices
+- SuperArea grouping across related areas
+- custom conversation phrases discovered from automations, blueprints, intent scripts, and manual targets
 
-For each utterance:
+## Current Routing Order
 
-1. Tries the selected **local conversation agent** directly.
-2. If that fails, tries **catalog-grounded fuzzy correction** and retries local.
-3. If that fails, asks the selected **LLM agent** to translate into one canonical phrase and retries local.
-4. If that fails, optionally falls back to direct **LLM handling**.
+The router currently evaluates an utterance in this order:
 
-The integration keeps a live catalog of entity and conversation targets, with manual target support.
+1. `fuzzy_local`
+   - Deterministic catalog matching runs first.
+   - If a candidate is accepted, the router sends the canonical phrase to the configured local conversation agent.
+2. `llm_translated_local`
+   - If fuzzy does not produce an accepted match, the LLM may translate the utterance into a canonical natural-language command.
+   - The translation must exactly match a valid catalog phrase or entity command. Internal names such as `HassTurnOn` are rejected.
+3. `exact_local`
+   - The original utterance is sent unchanged to the configured local conversation agent.
+4. `llm_fallback`
+   - If enabled, the original utterance is sent directly to the configured LLM agent.
 
-## Architecture Overview
+If the router is already inside an active continued conversation, it bypasses the normal routing order and sends the next utterance back to the same executor:
+- active local Home Assistant conversation -> direct local handoff
+- active LLM fallback conversation -> direct LLM handoff
 
-Core modules:
+Typical routing paths are:
+- `fuzzy_local`
+- `llm_translated_local`
+- `exact_local`
+- `llm_fallback`
+- `failed`
 
-- `conversation.py`: Home Assistant custom conversation agent entrypoint.
-- `agent_router.py`: Pipeline orchestration and path tracking.
-- `catalog.py` + `catalog_sources.py`: Live catalog build/rebuild from entities + discoverable sources + manual targets.
-- `matcher.py` + `phonetics.py`: Deterministic fuzzy matching with ASR-tolerant scoring.
-- `safety.py`: High-risk gating and opposite-verb protections.
-- `llm_adapter.py`: Structured LLM translation prompting and JSON parsing.
-- `local_agent_adapter.py`: HA conversation delegation wrappers.
-- `services.py`: `rebuild_catalog`, `get_catalog_stats`, `test_utterance`.
+When fuzzy already selects a valid route, LLM translation is skipped.
+
+## Continued Conversations
+
+The router preserves multi-turn clarification flows from both Home Assistant conversation handling and LLM fallback handling.
+
+If a downstream response returns `continue_conversation: true`, the router remembers which executor owns that `conversation_id`.
+
+On the next utterance with the same `conversation_id`, the router does not try to reinterpret the reply as a fresh command. Instead it sends the reply straight back to the same executor with the normal Home Assistant conversation context, including:
+- `conversation_id`
+- `device_id`
+- `satellite_id`
+- `extra_system_prompt`
+
+This applies to both:
+- local Home Assistant conversation / sentence-trigger clarifications
+- final LLM fallback clarifications
+
+Examples:
+- `turn on the hot tub` -> `What temp?` -> `99`
+- `set a timer` -> `For how long?` -> `ten minutes`
+
+Once the downstream agent returns `continue_conversation: false`, the router clears that active continuation and future utterances resume the normal routing pipeline.
+
+## Matching Behavior
+
+### Catalog-grounded fuzzy matching
+
+The matcher scores against:
+- exposed entities
+- conversation targets discovered from automations, blueprints, and intent scripts
+- manual targets
+
+Scoring uses multiple signals, including:
+- token similarity
+- phonetic similarity
+- edit similarity
+- action compatibility
+- structure similarity
+- semantic target similarity
+
+### Area and SuperArea resolution
+
+If an utterance omits an area, the matcher can use the origin area from the satellite/device context.
+
+For generic domain requests such as:
+- `turn on the light`
+- `turn off the fan`
+
+the router tries location resolution in this order:
+1. exact area match
+2. SuperArea match
+
+`SuperArea` is read from Home Assistant area labels. The supported label formats are:
+- `SuperArea: Great Room`
+- slug-style IDs such as `superarea_great_room`
+
+If a generic domain command maps to exactly one compatible entity in the origin area or SuperArea, that entity is preferred deterministically.
+
+### Conversation target ambiguity handling
+
+The matcher includes a few special cases for conversation targets:
+- exact phrase matches win outright
+- near-duplicate targets from the same automation/blueprint family do not block each other on ambiguity gap
+- slot-based targets are penalized when required slots are missing
 
 ## Installation
 
-1. Copy this repository into `config/custom_components/catalog_conversation_router`.
-2. Restart Home Assistant.
-3. Go to **Settings -> Devices & Services -> Add Integration**.
-4. Search for **Catalog Conversation Router**.
-5. Configure:
-   - `local_agent_id` (preferred executor)
-   - `llm_agent_id` (translator/fallback)
-   - thresholds and toggles.
+1. Copy this repository to `/config/custom_components/catalog_conversation_router`
+2. Restart Home Assistant
+3. Add the integration from `Settings -> Devices & Services`
+4. Configure:
+   - `local_agent_id`
+   - `llm_agent_id`
+   - thresholds and toggles as needed
 
 ## Configuration Options
 
 Required:
-
 - `local_agent_id`
 - `llm_agent_id`
 
 Optional:
-
 - `language` (default `en`)
 - `fuzzy_enabled` (default `true`)
-- `fuzzy_threshold` (default `0.84`)
-- `ambiguity_gap` (default `0.08`)
+- `fuzzy_threshold`
+- `ambiguity_gap`
 - `llm_translate_enabled` (default `true`)
 - `llm_fallback_enabled` (default `true`)
 - `debug_enabled` (default `false`)
 - `catalog_auto_refresh_enabled` (default `true`)
-- `high_risk_threshold` (default `0.96`)
-- `max_llm_candidates` (default `20`)
-- `manual_targets` (list of custom target objects)
+- `high_risk_threshold`
+- `max_llm_candidates`
+- `manual_targets`
 
-## Manual Conversation Targets
+## Manual Targets
 
-Use the options flow `manual_targets_json` field with a JSON list:
+Use the options flow `manual_targets_json` field with a JSON list such as:
 
 ```json
 [
@@ -75,426 +147,102 @@ Use the options flow `manual_targets_json` field with a JSON list:
 ]
 ```
 
-Manual targets are the primary reliable mechanism for custom conversation targets in v1.
-Runtime discovery from `intent_script` and automation sentence triggers is best-effort and depends
-on whether the running Home Assistant version exposes the required metadata at runtime.
+Manual targets remain the most predictable way to add custom conversation phrases.
 
 ## Services
 
+Available services:
 - `catalog_conversation_router.rebuild_catalog`
 - `catalog_conversation_router.get_catalog_stats`
 - `catalog_conversation_router.test_utterance`
+- `catalog_conversation_router.test_utterance_to_file`
+- `catalog_conversation_router.dump_catalog`
+- `catalog_conversation_router.dump_catalog_to_file`
 
-## Debugging
+## Preferred Debug Workflow
 
-Enable `debug_enabled` to include routing traces in logs, including:
+Use `catalog_conversation_router.test_utterance_to_file` when debugging routing behavior.
 
-- normalized utterance
-- selected path (`exact_local`, `fuzzy_local`, `llm_translated_local`, `llm_fallback`, `failed`)
-- top fuzzy candidates and scores
+Example:
+
+```yaml
+service: catalog_conversation_router.test_utterance_to_file
+data:
+  text: "turn on the fan"
+  area: "Kitchen"
+  path: "router_debug.json"
+```
+
+This writes a JSON file to:
+
+```text
+/config/router_debug.json
+```
+
+The file includes the full decision tree, including:
+- original and normalized utterance
+- origin area and SuperArea context
+- top fuzzy candidates with scores and detail
+- fuzzy safety decision
 - chosen canonical phrase
-- LLM translation summary
-- catalog revision
+- rendered Assist input
+- exact local branch outcome
+- fuzzy local branch outcome
+- LLM translation summary and raw text when collected
+- active continuation notes when a reply is routed directly back to local or LLM
+- final selected path and executor
 
-## Known Limitations
-
-- Discovery of custom-sentence and intent-script targets is best-effort and may vary by HA version/configuration.
-- In v1, manual conversation targets are recommended for predictable custom-target behavior.
-- Exact HA conversation response internals can vary by conversation agent implementation.
-- Some high-risk commands are intentionally blocked from weak fuzzy correction.
-
-## Example Corrections
-
-- `turn on the kitchen line` -> `turn on kitchen light`
-- `activate movie moat` -> `activate movie mode`
-- `turn off the haul light` -> `turn off hall light`
-
-# Catalog Conversation Router
-
-`catalog_conversation_router` is a Home Assistant custom integration that provides a **smart conversation router** with local-first execution, catalog‑grounded fuzzy correction, optional LLM translation, and final LLM fallback.
-
-The goal of the integration is to make voice control significantly more tolerant of:
-
-- ASR mistakes
-- partial commands
-- missing area references
-- near‑matches for entity names
-
-while still keeping execution **deterministic and local-first**.
-
----
-
-# How Routing Works
-
-Every utterance follows this pipeline:
-
-1. **Exact Local Agent**  
-   The configured Home Assistant conversation agent is called directly.
-
-   If the local agent successfully executes the command, the router stops.
-
-2. **Catalog‑Grounded Fuzzy Correction**  
-   If the local agent fails, the router attempts deterministic fuzzy matching using the internal catalog of:
-
-   - exposed entities
-   - conversation triggers
-   - manual targets
-
-   If a strong match is found, the router rewrites the command into a **canonical phrase** and retries the local agent.
-
-3. **LLM Translation (optional)**  
-   If fuzzy matching fails, the configured LLM agent can attempt to translate the utterance into a canonical command.
-
-4. **LLM Fallback (optional)**  
-   If translation fails, the request can optionally be handed directly to the LLM.
-
-Typical routing paths:
-
-- `exact_local`
-- `fuzzy_local`
-- `llm_translated_local`
-- `llm_fallback`
-- `failed`
-
----
-
-# Key Features
-
-## Local‑First Execution
-
-Commands always attempt execution through the configured Home Assistant conversation agent before any fuzzy or LLM logic runs.
-
-This preserves:
-
-- native Home Assistant intent handling
-- device integrations
-- local automations
-
----
-
-## Catalog‑Grounded Fuzzy Matching
-
-The integration maintains a **live catalog** of targets including:
-
-- exposed entities
-- automation conversation triggers
-- intent scripts
-- manual targets
-
-The fuzzy matcher is **deterministic and explainable** and uses multiple scoring signals:
-
-- token similarity
-- phonetic similarity
-- edit distance
-- action compatibility
-- structure similarity
-- semantic target similarity
-
-Example corrections:
-
-```
-turn on the kitchen line → turn on kitchen light
-activate movie moat → activate movie mode
-turn off the haul light → turn off hall light
-```
-
----
-
-## Area‑Aware Matching
-
-If a command does **not include an area**, the router can use the **area of the satellite/device that issued the command**.
+Set `execute_branches: true` only when you explicitly want to execute downstream branches while collecting the trace.
 
 Example:
 
-Utterance:
-
-```
-turn off the fan
-```
-
-If the request originated from a satellite in **Great Room**, the matcher will prefer:
-
-```
-fan.great_room_fan
+```yaml
+service: catalog_conversation_router.test_utterance_to_file
+data:
+  text: "turn on the fan"
+  area: "Kitchen"
+  path: "router_debug_full.json"
+  execute_branches: true
 ```
 
-instead of unrelated fans elsewhere.
+`catalog_conversation_router.test_utterance` returns the same trace payload as a service response without writing a file.
 
-Area awareness is applied as a **ranking boost**, not a hard filter.
+## Catalog Inspection
 
----
+To inspect the live catalog, use:
+- `catalog_conversation_router.dump_catalog`
+- `catalog_conversation_router.dump_catalog_to_file`
 
-## Domain Hint Matching
+The file-based variant writes to `/config`, defaulting to:
 
-Generic commands like:
-
-```
-turn on the light
-turn off the fan
-turn on the TV
-```
-
-receive additional scoring bias toward entities whose **domain matches the noun**.
-
-Example:
-
-```
-fan → fan.* entities
-light → light.* entities
-```
-
----
-
-# Catalog System
-
-The router maintains a **live catalog** containing:
-
-- entity targets
-- conversation targets
-- manual targets
-
-The catalog is refreshed automatically or via service.
-
----
-
-## Dumping the Catalog to a File
-
-A debugging service allows writing the full catalog to disk.
-
-Service:
-
-```
-catalog_conversation_router.dump_catalog_to_file
-```
-
-Default output:
-
-```
+```text
 /config/catalog_router_catalog.json
 ```
 
-Optional parameter:
-
-```yaml
-path: catalog_router_catalog.json
-```
-
-This file contains:
-
-- entity entries
+Catalog dumps are useful for verifying:
+- entity names
 - areas
+- `super_area`
 - aliases
-- tokens
-- phonetic tokens
-- conversation targets
+- capabilities
+- conversation targets discovered from YAML or blueprints
 
-This is extremely useful when diagnosing fuzzy matching behavior.
+## Logging
 
----
+Normal routing decisions are now debug-level only.
 
-# Architecture Overview
+Warnings are reserved for actual failures or unavailable runtime components, so routine utterance debugging should happen through `test_utterance_to_file` rather than log inspection.
 
-Core modules:
+## Known Limitations
 
-```
-conversation.py
-```
-Home Assistant custom conversation agent entrypoint.
+- Discovery of custom sentence triggers and intent scripts still depends on Home Assistant internals and can vary by version.
+- Some high-risk corrections are intentionally blocked.
+- Response payloads can vary by underlying conversation agent.
 
-```
-agent_router.py
-```
-Pipeline orchestration and routing logic.
+## Example Outcomes
 
-```
-catalog.py
-catalog_sources.py
-```
-Builds the live catalog of entities and conversation targets.
-
-```
-matcher.py
-phonetics.py
-```
-Deterministic fuzzy matching and ASR‑tolerant scoring.
-
-```
-safety.py
-```
-Guards against dangerous corrections (ex: opposite verbs).
-
-```
-local_agent_adapter.py
-```
-Delegates execution to the configured Home Assistant conversation agent.
-
-```
-llm_adapter.py
-```
-Handles LLM translation and structured parsing.
-
-```
-services.py
-```
-Service definitions.
-
----
-
-# Installation
-
-1. Copy the repository into:
-
-```
-/config/custom_components/catalog_conversation_router
-```
-
-2. Restart Home Assistant.
-
-3. Go to:
-
-```
-Settings → Devices & Services → Add Integration
-```
-
-4. Search for:
-
-```
-Catalog Conversation Router
-```
-
-5. Configure:
-
-- `local_agent_id`
-- `llm_agent_id`
-- thresholds
-
----
-
-# Configuration Options
-
-Required:
-
-```
-local_agent_id
-llm_agent_id
-```
-
-Optional:
-
-```
-language (default "en")
-fuzzy_enabled (default true)
-fuzzy_threshold (default 0.84)
-ambiguity_gap (default 0.08)
-llm_translate_enabled (default true)
-llm_fallback_enabled (default true)
-debug_enabled (default false)
-catalog_auto_refresh_enabled (default true)
-high_risk_threshold (default 0.96)
-max_llm_candidates (default 20)
-manual_targets
-```
-
----
-
-# Services
-
-### Rebuild Catalog
-
-```
-catalog_conversation_router.rebuild_catalog
-```
-
-Forces a full catalog rebuild.
-
----
-
-### Get Catalog Stats
-
-```
-catalog_conversation_router.get_catalog_stats
-```
-
-Returns:
-
-- entity count
-- conversation target count
-- revision id
-
----
-
-### Test Utterance
-
-```
-catalog_conversation_router.test_utterance
-```
-
-Allows testing routing without executing commands.
-
-Optional parameters include:
-
-```
-area
-satellite_id
-device_id
-```
-
-The trace will show how the router evaluated the command.
-
----
-
-### Dump Catalog to File
-
-```
-catalog_conversation_router.dump_catalog_to_file
-```
-
-Writes the full catalog to a JSON file for inspection.
-
----
-
-# Debugging
-
-Enable:
-
-```
-debug_enabled: true
-```
-
-Trace output includes:
-
-- normalized utterance
-- selected routing path
-- exact local result
-- fuzzy candidate list
-- fuzzy scores
-- canonical phrase chosen
-- LLM translation summary
-- catalog revision
-- origin area
-- effective area hint
-
-Example path output:
-
-```
-selected_path: fuzzy_local
-```
-
----
-
-# Known Limitations
-
-- Discovery of custom conversation triggers depends on Home Assistant internals and may vary by version.
-- Some commands intentionally bypass fuzzy matching for safety reasons.
-- Exact conversation response formats can vary between conversation agents.
-
----
-
-# Example Corrections
-
-```
-turn on the kitchen line → turn on kitchen light
-activate movie moat → activate movie mode
-turn off the haul light → turn off hall light
-turn off the fan (Great Room satellite) → fan.great_room_fan
-```
+- `turn on the ligh` in `Master Bedroom` -> `turn on Master Bedroom Light`
+- `turn on the fan` from `Kitchen` with `SuperArea: Great Room` -> `turn on Great Room Fan`
+- `turn on the spa` -> exact spa automation phrase wins without falling through to LLM
+- `turn on the hot tub` -> `What temp?` -> `99` stays in the same local HA conversation
+- `set a timer` -> `For how long?` -> `ten minutes` stays in the same LLM fallback conversation

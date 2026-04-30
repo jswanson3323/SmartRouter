@@ -38,6 +38,7 @@ class AgentRouter:
         self._agent_adapter = agent_adapter
         self._llm_adapter = llm_adapter
         self._hass = hass
+        self._active_conversations: dict[str, str] = {}
 
     async def async_route(
         self,
@@ -52,10 +53,10 @@ class AgentRouter:
         origin_area: str | None = None,
         device_id: str | None = None,
         satellite_id: str | None = None,
+        extra_system_prompt: str | None = None,
     ) -> RouterResult:
         """Run deterministic routing pipeline with bounded attempts."""
         _LOGGER.debug("ROUTER START: text=%r, device_id=%r, satellite_id=%r", text, device_id, satellite_id)
-        _LOGGER.warning("ROUTER INPUT: %r", text)
         catalog = self._catalog.get_catalog()
         resolved_origin_area = origin_area or self._resolve_origin_area(device_id=device_id, satellite_id=satellite_id, context=context)
         resolved_origin_super_area = self._resolve_origin_super_area(
@@ -64,21 +65,12 @@ class AgentRouter:
             satellite_id=satellite_id,
             context=context,
         )
-        match_result = self._matcher.match(
-            text,
-            catalog,
-            origin_area=resolved_origin_area,
-            origin_super_area=resolved_origin_super_area,
-        )
-        _LOGGER.warning("FUZZY MATCH: best=%s score=%s", getattr(match_result.best, "canonical_phrase", None), getattr(match_result.best, "score", None))
         trace = ResolutionTrace(
             original_utterance=text,
-            normalized_utterance=match_result.normalized_utterance,
+            normalized_utterance=normalize_text(text),
             catalog_revision=catalog.metadata.revision,
             origin_area=resolved_origin_area,
             origin_super_area=resolved_origin_super_area,
-            effective_area_hint=match_result.effective_area_hint,
-            effective_super_area_hint=match_result.effective_super_area_hint,
         )
         selected_path: ResolutionPath | None = None
         selected_outcome = None
@@ -96,6 +88,92 @@ class AgentRouter:
             setattr(trace, f"{prefix}_response_type", outcome.response_type)
             setattr(trace, f"{prefix}_error_code", outcome.error_code)
             setattr(trace, f"{prefix}_processed_locally", outcome.processed_locally)
+
+        active_executor = self._active_conversations.get(conversation_id) if conversation_id else None
+        if active_executor == "llm":
+            trace.assist_pipeline_input = text
+            trace.rendered_from_pattern = False
+            trace.rendered_slots = {}
+            trace.llm_translation_summary = {
+                "mode": "skipped",
+                "confidence": 0.0,
+                "target_type": "unknown",
+                "valid": False,
+                "notes": "active_llm_conversation",
+            }
+            trace.llm_translated_local_executed = False
+            if self._config.llm_fallback_enabled:
+                if _should_execute_branch():
+                    llm_outcome = await self._llm_adapter.async_final_fallback(
+                        llm_agent_id=self._config.llm_agent_id,
+                        utterance=text,
+                        language=language,
+                        conversation_id=conversation_id,
+                        context=context,
+                        device_id=device_id,
+                        satellite_id=satellite_id,
+                        extra_system_prompt=extra_system_prompt,
+                    )
+                else:
+                    llm_outcome = None
+                _record_outcome("llm_fallback", llm_outcome)
+                self._update_conversation_tracking(conversation_id, llm_outcome, executor="llm")
+                trace.selected_path = ResolutionPath.LLM_FALLBACK
+                trace.final_executor = "llm"
+                return RouterResult(
+                    path=ResolutionPath.LLM_FALLBACK,
+                    outcome=llm_outcome,
+                    trace=trace,
+                )
+        if active_executor == "local":
+            trace.assist_pipeline_input = text
+            trace.rendered_from_pattern = False
+            trace.rendered_slots = {}
+            trace.llm_translation_summary = {
+                "mode": "skipped",
+                "confidence": 0.0,
+                "target_type": "unknown",
+                "valid": False,
+                "notes": "active_local_conversation",
+            }
+            trace.llm_translated_local_executed = False
+            if _should_execute_branch():
+                local_outcome = await self._agent_adapter.async_process(
+                    agent_id=self._config.local_agent_id,
+                    text=text,
+                    language=language,
+                    conversation_id=conversation_id,
+                    context=context,
+                    device_id=device_id,
+                    satellite_id=satellite_id,
+                    extra_system_prompt=extra_system_prompt,
+                )
+            else:
+                local_outcome = None
+            _record_outcome("exact_local", local_outcome)
+            self._update_conversation_tracking(conversation_id, local_outcome, executor="local")
+            trace.selected_path = ResolutionPath.EXACT_LOCAL
+            trace.final_executor = "local"
+            return RouterResult(
+                path=ResolutionPath.EXACT_LOCAL,
+                outcome=local_outcome,
+                trace=trace,
+            )
+
+        match_result = self._matcher.match(
+            text,
+            catalog,
+            origin_area=resolved_origin_area,
+            origin_super_area=resolved_origin_super_area,
+        )
+        _LOGGER.debug(
+            "FUZZY MATCH: best=%s score=%s",
+            getattr(match_result.best, "canonical_phrase", None),
+            getattr(match_result.best, "score", None),
+        )
+        trace.normalized_utterance = match_result.normalized_utterance
+        trace.effective_area_hint = match_result.effective_area_hint
+        trace.effective_super_area_hint = match_result.effective_super_area_hint
 
         # 1) fuzzy attempt
         if self._config.fuzzy_enabled and match_result.best is not None:
@@ -171,9 +249,10 @@ class AgentRouter:
                 else:
                     fuzzy_outcome = None
                 _record_outcome("fuzzy_local", fuzzy_outcome)
+                self._update_conversation_tracking(conversation_id, fuzzy_outcome, executor="local")
 
                 if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
-                    _LOGGER.warning("ROUTER DECISION: FUZZY_LOCAL")
+                    _LOGGER.debug("ROUTER DECISION: FUZZY_LOCAL")
                     if selected_path is None:
                         selected_path = ResolutionPath.FUZZY_LOCAL
                         selected_outcome = fuzzy_outcome
@@ -214,9 +293,10 @@ class AgentRouter:
                     else:
                         fuzzy_outcome = None
                     _record_outcome("fuzzy_local", fuzzy_outcome)
+                    self._update_conversation_tracking(conversation_id, fuzzy_outcome, executor="local")
 
                     if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
-                        _LOGGER.warning("ROUTER DECISION: FUZZY_LOCAL")
+                        _LOGGER.debug("ROUTER DECISION: FUZZY_LOCAL")
                         if selected_path is None:
                             selected_path = ResolutionPath.FUZZY_LOCAL
                             selected_outcome = fuzzy_outcome
@@ -254,7 +334,12 @@ class AgentRouter:
                 origin_super_area=resolved_origin_super_area,
                 preserve_raw_text=debug_collect_all,
             )
-            _LOGGER.warning("LLM TRANSLATION: valid=%s canonical=%s mode=%s", translation.valid, translation.canonical_text, translation.mode)
+            _LOGGER.debug(
+                "LLM TRANSLATION: valid=%s canonical=%s mode=%s",
+                translation.valid,
+                translation.canonical_text,
+                translation.mode,
+            )
             trace.llm_translation_summary = {
                 "mode": translation.mode,
                 "confidence": translation.confidence,
@@ -284,9 +369,10 @@ class AgentRouter:
                 else:
                     translated_outcome = None
                 _record_outcome("llm_translated_local", translated_outcome)
+                self._update_conversation_tracking(conversation_id, translated_outcome, executor="local")
 
                 if dry_run or (translated_outcome is not None and translated_outcome.success):
-                    _LOGGER.warning("ROUTER DECISION: LLM_TRANSLATED_LOCAL")
+                    _LOGGER.debug("ROUTER DECISION: LLM_TRANSLATED_LOCAL")
                     if selected_path is None:
                         selected_path = ResolutionPath.LLM_TRANSLATED_LOCAL
                         selected_outcome = translated_outcome
@@ -314,7 +400,12 @@ class AgentRouter:
         else:
             exact = None
         if exact is not None:
-            _LOGGER.warning("EXACT LOCAL: success=%s response=%r processed_locally=%s", exact.success, exact.response_text, exact.processed_locally)
+            _LOGGER.debug(
+                "EXACT LOCAL: success=%s response=%r processed_locally=%s",
+                exact.success,
+                exact.response_text,
+                exact.processed_locally,
+            )
             trace.exact_local_executed = True
             trace.exact_local_outcome = "success" if exact.success else "failed"
             trace.exact_local_response_text = exact.response_text
@@ -324,12 +415,13 @@ class AgentRouter:
             trace.failure_category = (
                 exact.failure_category.value if exact.failure_category is not None else None
             )
+            self._update_conversation_tracking(conversation_id, exact, executor="local")
         else:
             trace.exact_local_executed = False
             trace.exact_local_outcome = "skipped"
 
         if exact is not None and exact.success and exact.processed_locally is True:
-            _LOGGER.warning("ROUTER DECISION: EXACT_LOCAL")
+            _LOGGER.debug("ROUTER DECISION: EXACT_LOCAL")
             if selected_path is None:
                 trace.assist_pipeline_input = text
                 trace.rendered_from_pattern = False
@@ -342,7 +434,7 @@ class AgentRouter:
                 return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
 
         if exact is not None and exact.success and exact.processed_locally is not True:
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "EXACT LOCAL rejected: success=%s processed_locally=%s response=%r",
                 exact.success,
                 exact.processed_locally,
@@ -352,18 +444,25 @@ class AgentRouter:
         # 4) final direct llm fallback
         if self._config.llm_fallback_enabled:
             if _should_execute_branch():
-                _LOGGER.warning("ROUTER DECISION: LLM_FALLBACK (calling LLM)")
+                _LOGGER.debug("ROUTER DECISION: LLM_FALLBACK (calling LLM)")
                 llm_outcome = await self._llm_adapter.async_final_fallback(
                     llm_agent_id=self._config.llm_agent_id,
                     utterance=text,
                     language=language,
                     conversation_id=conversation_id,
                     context=context,
+                    device_id=device_id,
+                    satellite_id=satellite_id,
+                    extra_system_prompt=extra_system_prompt,
                 )
             else:
                 llm_outcome = None
             _record_outcome("llm_fallback", llm_outcome)
-            _LOGGER.warning("LLM FALLBACK RESPONSE: %r", getattr(llm_outcome, "response_text", None) if llm_outcome is not None else None)
+            self._update_conversation_tracking(conversation_id, llm_outcome, executor="llm")
+            _LOGGER.debug(
+                "LLM FALLBACK RESPONSE: %r",
+                getattr(llm_outcome, "response_text", None) if llm_outcome is not None else None,
+            )
             if selected_path is None:
                 trace.selected_path = ResolutionPath.LLM_FALLBACK
                 trace.final_executor = "llm"
@@ -373,11 +472,46 @@ class AgentRouter:
                 return RouterResult(path=ResolutionPath.LLM_FALLBACK, outcome=llm_outcome, trace=trace)
 
         if selected_path is None:
+            _LOGGER.warning(
+                "Router failed to resolve utterance locally or through fallback: text=%r origin_area=%r origin_super_area=%r",
+                text,
+                resolved_origin_area,
+                resolved_origin_super_area,
+            )
             trace.selected_path = ResolutionPath.FAILED
             trace.final_executor = "none"
             return RouterResult(path=ResolutionPath.FAILED, outcome=exact, trace=trace)
 
         return RouterResult(path=selected_path, outcome=selected_outcome, trace=trace)
+
+    def _update_conversation_tracking(
+        self,
+        conversation_id: str | None,
+        outcome: Any,
+        *,
+        executor: str,
+    ) -> None:
+        """Track whether a conversation should continue and where it should return."""
+        if not conversation_id:
+            return
+
+        should_continue = self._extract_continue_conversation(outcome)
+        if should_continue:
+            self._active_conversations[conversation_id] = executor
+        else:
+            self._active_conversations.pop(conversation_id, None)
+
+    def _extract_continue_conversation(self, outcome: Any) -> bool:
+        """Best-effort extract continue_conversation from a downstream response."""
+        if outcome is None:
+            return False
+
+        response = getattr(outcome, "response", None)
+        if response is None:
+            return False
+
+        value = getattr(response, "continue_conversation", None)
+        return value is True
 
     def _resolve_origin_area(
         self,

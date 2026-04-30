@@ -131,9 +131,15 @@ def _outcome(success, text="ok"):
     )
 
 
-def _conversation_result_outcome(success, text="ok", *, continue_conversation=False):
+def _conversation_result_outcome(
+    success,
+    text="ok",
+    *,
+    continue_conversation=False,
+    conversation_id="downstream-conv-1",
+):
     response = types.SimpleNamespace(
-        conversation_id="conv-1",
+        conversation_id=conversation_id,
         continue_conversation=continue_conversation,
         response=types.SimpleNamespace(response_type="query_answer"),
     )
@@ -144,12 +150,20 @@ def _conversation_result_outcome(success, text="ok", *, continue_conversation=Fa
         failure_category=None,
         raw=response,
         processed_locally=False,
+        conversation_id=conversation_id,
+        continue_conversation=continue_conversation,
     )
 
 
-def _local_conversation_result_outcome(success, text="ok", *, continue_conversation=False):
+def _local_conversation_result_outcome(
+    success,
+    text="ok",
+    *,
+    continue_conversation=False,
+    conversation_id="downstream-conv-2",
+):
     response = types.SimpleNamespace(
-        conversation_id="conv-2",
+        conversation_id=conversation_id,
         continue_conversation=continue_conversation,
         response=types.SimpleNamespace(response_type="query_answer"),
         processed_locally=True,
@@ -161,6 +175,8 @@ def _local_conversation_result_outcome(success, text="ok", *, continue_conversat
         failure_category=None,
         raw=response,
         processed_locally=True,
+        conversation_id=conversation_id,
+        continue_conversation=continue_conversation,
     )
 
 
@@ -327,7 +343,7 @@ def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
         router.async_route(
             text="set a timer",
             language="en",
-            conversation_id="conv-1",
+            conversation_id="outer-conv-1",
             context=None,
         )
     )
@@ -342,7 +358,7 @@ def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
         router.async_route(
             text="ten minutes",
             language="en",
-            conversation_id="conv-1",
+            conversation_id="outer-conv-1",
             context=None,
             device_id="device-123",
             satellite_id="assist_satellite.kitchen",
@@ -352,12 +368,13 @@ def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
 
     assert second.path.value == "llm_fallback"
     assert matcher.calls == []
-    assert llm_adapter.fallback_calls[-1]["conversation_id"] == "conv-1"
+    assert llm_adapter.fallback_calls[-1]["conversation_id"] == "downstream-conv-1"
     assert llm_adapter.fallback_calls[-1]["device_id"] == "device-123"
     assert llm_adapter.fallback_calls[-1]["satellite_id"] == "assist_satellite.kitchen"
     assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] == "You are assisting from the kitchen satellite."
     assert second.trace.llm_translation_summary is not None
     assert second.trace.llm_translation_summary["notes"] == "active_llm_conversation"
+    assert second.trace.downstream_conversation_id == "downstream-conv-1"
 
 
 def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None:
@@ -382,7 +399,7 @@ def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None
         router.async_route(
             text="turn on the hot tub",
             language="en",
-            conversation_id="conv-2",
+            conversation_id="outer-conv-2",
             context=None,
         )
     )
@@ -394,7 +411,7 @@ def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None
         router.async_route(
             text="99",
             language="en",
-            conversation_id="conv-2",
+            conversation_id="outer-conv-2",
             context=None,
             device_id="device-123",
             satellite_id="assist_satellite.spa",
@@ -404,12 +421,13 @@ def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None
 
     assert second.path.value == "exact_local"
     assert matcher.calls == []
-    assert agent_adapter.calls[-1]["conversation_id"] == "conv-2"
+    assert agent_adapter.calls[-1]["conversation_id"] == "downstream-conv-2"
     assert agent_adapter.calls[-1]["device_id"] == "device-123"
     assert agent_adapter.calls[-1]["satellite_id"] == "assist_satellite.spa"
     assert agent_adapter.calls[-1]["extra_system_prompt"] == "You are assisting from the spa satellite."
     assert second.trace.llm_translation_summary is not None
     assert second.trace.llm_translation_summary["notes"] == "active_local_conversation"
+    assert second.trace.downstream_conversation_id == "downstream-conv-2"
 
 
 def test_conversation_pattern_is_rendered_for_assist_input() -> None:

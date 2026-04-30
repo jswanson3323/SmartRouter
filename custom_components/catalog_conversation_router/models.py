@@ -148,6 +148,8 @@ class LocalAgentOutcome:
     response_type: str | None = None
     error_code: str | None = None
     processed_locally: bool | None = None
+    conversation_id: str | None = None
+    continue_conversation: bool | None = None
 
 
 @dataclass(slots=True)
@@ -176,8 +178,14 @@ class ResolutionTrace:
     exact_local_error_code: str | None = None
     exact_local_processed_locally: bool | None = None
     exact_local_executed: bool | None = None
+    exact_local_conversation_id: str | None = None
+    exact_local_continue_conversation: bool | None = None
     origin_area: str | None = None
     origin_super_area: str | None = None
+    active_conversation_executor: str | None = None
+    active_conversation_agent_id: str | None = None
+    downstream_conversation_id: str | None = None
+    continuation_routed_directly: bool | None = None
     effective_area_hint: str | None = None
     effective_super_area_hint: str | None = None
     failure_category: str | None = None
@@ -189,6 +197,8 @@ class ResolutionTrace:
     fuzzy_local_error_code: str | None = None
     fuzzy_local_processed_locally: bool | None = None
     fuzzy_local_executed: bool | None = None
+    fuzzy_local_conversation_id: str | None = None
+    fuzzy_local_continue_conversation: bool | None = None
     llm_translation_raw_text: str | None = None
     llm_translated_local_outcome: str | None = None
     llm_translated_local_response_text: str | None = None
@@ -196,12 +206,16 @@ class ResolutionTrace:
     llm_translated_local_error_code: str | None = None
     llm_translated_local_processed_locally: bool | None = None
     llm_translated_local_executed: bool | None = None
+    llm_translated_local_conversation_id: str | None = None
+    llm_translated_local_continue_conversation: bool | None = None
     llm_fallback_outcome: str | None = None
     llm_fallback_response_text: str | None = None
     llm_fallback_response_type: str | None = None
     llm_fallback_error_code: str | None = None
     llm_fallback_processed_locally: bool | None = None
     llm_fallback_executed: bool | None = None
+    llm_fallback_conversation_id: str | None = None
+    llm_fallback_continue_conversation: bool | None = None
     chosen_canonical_phrase: str | None = None
     assist_pipeline_input: str | None = None
     matched_sample_phrase_raw: str | None = None
@@ -225,6 +239,18 @@ class RouterResult:
     path: ResolutionPath
     outcome: LocalAgentOutcome
     trace: ResolutionTrace
+
+
+@dataclass(slots=True)
+class ActiveConversationState:
+    """Tracks an active delegated conversation thread."""
+
+    outer_conversation_id: str
+    executor_type: str
+    agent_id: str
+    downstream_conversation_id: str | None
+    started_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
+    last_updated_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
 
 
 @dataclass(slots=True)

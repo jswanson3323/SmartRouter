@@ -75,10 +75,19 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
         if result.outcome.response is not None:
             response = result.outcome.response
             processed_locally = result.outcome.processed_locally is True
+            continue_conversation = result.outcome.continue_conversation is True
 
             # If the downstream local agent already returned a full ConversationResult,
             # preserve it and only try to annotate processed_locally when supported.
             if hasattr(response, "response") and hasattr(response, "conversation_id"):
+                try:
+                    setattr(response, "conversation_id", user_input.conversation_id)
+                except Exception:
+                    pass
+                try:
+                    setattr(response, "continue_conversation", continue_conversation)
+                except Exception:
+                    pass
                 if processed_locally:
                     try:
                         setattr(response, "processed_locally", True)
@@ -95,14 +104,14 @@ class CatalogRouterConversationAgent(AbstractConversationAgent):
                 return ConversationResult(
                     response=response,
                     conversation_id=user_input.conversation_id,
-                    continue_conversation=False,
+                    continue_conversation=continue_conversation,
                     processed_locally=processed_locally,
                 )
             except TypeError:
                 wrapped = ConversationResult(
                     response=response,
                     conversation_id=user_input.conversation_id,
-                    continue_conversation=False,
+                    continue_conversation=continue_conversation,
                 )
                 if processed_locally:
                     try:

@@ -10,7 +10,7 @@ from typing import Any
 from .catalog import CatalogManager
 from .llm_adapter import LLMAdapter
 from .matcher import FuzzyMatcher
-from .models import ResolutionPath, ResolutionTrace, RouterConfig, RouterResult
+from .models import ActiveConversationState, ResolutionPath, ResolutionTrace, RouterConfig, RouterResult
 from .phrase_renderer import render_conversation_pattern
 from .phonetics import normalize_text
 from .safety import validate_fuzzy_execution
@@ -38,7 +38,7 @@ class AgentRouter:
         self._agent_adapter = agent_adapter
         self._llm_adapter = llm_adapter
         self._hass = hass
-        self._active_conversations: dict[str, str] = {}
+        self._active_conversations: dict[str, ActiveConversationState] = {}
 
     async def async_route(
         self,
@@ -88,9 +88,17 @@ class AgentRouter:
             setattr(trace, f"{prefix}_response_type", outcome.response_type)
             setattr(trace, f"{prefix}_error_code", outcome.error_code)
             setattr(trace, f"{prefix}_processed_locally", outcome.processed_locally)
+            setattr(trace, f"{prefix}_conversation_id", outcome.conversation_id)
+            setattr(trace, f"{prefix}_continue_conversation", outcome.continue_conversation)
 
-        active_executor = self._active_conversations.get(conversation_id) if conversation_id else None
-        if active_executor == "llm":
+        active_state = self._active_conversations.get(conversation_id) if conversation_id else None
+        if active_state is not None:
+            trace.active_conversation_executor = active_state.executor_type
+            trace.active_conversation_agent_id = active_state.agent_id
+            trace.downstream_conversation_id = active_state.downstream_conversation_id
+            trace.continuation_routed_directly = True
+
+        if active_state is not None and active_state.executor_type == "llm":
             trace.assist_pipeline_input = text
             trace.rendered_from_pattern = False
             trace.rendered_slots = {}
@@ -105,10 +113,10 @@ class AgentRouter:
             if self._config.llm_fallback_enabled:
                 if _should_execute_branch():
                     llm_outcome = await self._llm_adapter.async_final_fallback(
-                        llm_agent_id=self._config.llm_agent_id,
+                        llm_agent_id=active_state.agent_id,
                         utterance=text,
                         language=language,
-                        conversation_id=conversation_id,
+                        conversation_id=active_state.downstream_conversation_id,
                         context=context,
                         device_id=device_id,
                         satellite_id=satellite_id,
@@ -117,7 +125,12 @@ class AgentRouter:
                 else:
                     llm_outcome = None
                 _record_outcome("llm_fallback", llm_outcome)
-                self._update_conversation_tracking(conversation_id, llm_outcome, executor="llm")
+                self._update_conversation_tracking(
+                    conversation_id,
+                    llm_outcome,
+                    executor="llm",
+                    agent_id=active_state.agent_id,
+                )
                 trace.selected_path = ResolutionPath.LLM_FALLBACK
                 trace.final_executor = "llm"
                 return RouterResult(
@@ -125,7 +138,7 @@ class AgentRouter:
                     outcome=llm_outcome,
                     trace=trace,
                 )
-        if active_executor == "local":
+        if active_state is not None and active_state.executor_type == "local":
             trace.assist_pipeline_input = text
             trace.rendered_from_pattern = False
             trace.rendered_slots = {}
@@ -139,10 +152,10 @@ class AgentRouter:
             trace.llm_translated_local_executed = False
             if _should_execute_branch():
                 local_outcome = await self._agent_adapter.async_process(
-                    agent_id=self._config.local_agent_id,
+                    agent_id=active_state.agent_id,
                     text=text,
                     language=language,
-                    conversation_id=conversation_id,
+                    conversation_id=active_state.downstream_conversation_id,
                     context=context,
                     device_id=device_id,
                     satellite_id=satellite_id,
@@ -151,7 +164,12 @@ class AgentRouter:
             else:
                 local_outcome = None
             _record_outcome("exact_local", local_outcome)
-            self._update_conversation_tracking(conversation_id, local_outcome, executor="local")
+            self._update_conversation_tracking(
+                conversation_id,
+                local_outcome,
+                executor="local",
+                agent_id=active_state.agent_id,
+            )
             trace.selected_path = ResolutionPath.EXACT_LOCAL
             trace.final_executor = "local"
             return RouterResult(
@@ -249,7 +267,12 @@ class AgentRouter:
                 else:
                     fuzzy_outcome = None
                 _record_outcome("fuzzy_local", fuzzy_outcome)
-                self._update_conversation_tracking(conversation_id, fuzzy_outcome, executor="local")
+                self._update_conversation_tracking(
+                    conversation_id,
+                    fuzzy_outcome,
+                    executor="local",
+                    agent_id=self._config.local_agent_id,
+                )
 
                 if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
                     _LOGGER.debug("ROUTER DECISION: FUZZY_LOCAL")
@@ -293,7 +316,12 @@ class AgentRouter:
                     else:
                         fuzzy_outcome = None
                     _record_outcome("fuzzy_local", fuzzy_outcome)
-                    self._update_conversation_tracking(conversation_id, fuzzy_outcome, executor="local")
+                    self._update_conversation_tracking(
+                        conversation_id,
+                        fuzzy_outcome,
+                        executor="local",
+                        agent_id=self._config.local_agent_id,
+                    )
 
                     if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
                         _LOGGER.debug("ROUTER DECISION: FUZZY_LOCAL")
@@ -369,7 +397,12 @@ class AgentRouter:
                 else:
                     translated_outcome = None
                 _record_outcome("llm_translated_local", translated_outcome)
-                self._update_conversation_tracking(conversation_id, translated_outcome, executor="local")
+                self._update_conversation_tracking(
+                    conversation_id,
+                    translated_outcome,
+                    executor="local",
+                    agent_id=self._config.local_agent_id,
+                )
 
                 if dry_run or (translated_outcome is not None and translated_outcome.success):
                     _LOGGER.debug("ROUTER DECISION: LLM_TRANSLATED_LOCAL")
@@ -415,7 +448,12 @@ class AgentRouter:
             trace.failure_category = (
                 exact.failure_category.value if exact.failure_category is not None else None
             )
-            self._update_conversation_tracking(conversation_id, exact, executor="local")
+            self._update_conversation_tracking(
+                conversation_id,
+                exact,
+                executor="local",
+                agent_id=self._config.local_agent_id,
+            )
         else:
             trace.exact_local_executed = False
             trace.exact_local_outcome = "skipped"
@@ -458,7 +496,12 @@ class AgentRouter:
             else:
                 llm_outcome = None
             _record_outcome("llm_fallback", llm_outcome)
-            self._update_conversation_tracking(conversation_id, llm_outcome, executor="llm")
+            self._update_conversation_tracking(
+                conversation_id,
+                llm_outcome,
+                executor="llm",
+                agent_id=self._config.llm_agent_id,
+            )
             _LOGGER.debug(
                 "LLM FALLBACK RESPONSE: %r",
                 getattr(llm_outcome, "response_text", None) if llm_outcome is not None else None,
@@ -490,28 +533,31 @@ class AgentRouter:
         outcome: Any,
         *,
         executor: str,
+        agent_id: str,
     ) -> None:
         """Track whether a conversation should continue and where it should return."""
         if not conversation_id:
             return
 
-        should_continue = self._extract_continue_conversation(outcome)
+        should_continue = getattr(outcome, "continue_conversation", None) is True
         if should_continue:
-            self._active_conversations[conversation_id] = executor
+            downstream_conversation_id = getattr(outcome, "conversation_id", None) or conversation_id
+            state = self._active_conversations.get(conversation_id)
+            started_at = state.started_at if state is not None else ActiveConversationState(
+                outer_conversation_id=conversation_id,
+                executor_type=executor,
+                agent_id=agent_id,
+                downstream_conversation_id=downstream_conversation_id,
+            ).started_at
+            self._active_conversations[conversation_id] = ActiveConversationState(
+                outer_conversation_id=conversation_id,
+                executor_type=executor,
+                agent_id=agent_id,
+                downstream_conversation_id=downstream_conversation_id,
+                started_at=started_at,
+            )
         else:
             self._active_conversations.pop(conversation_id, None)
-
-    def _extract_continue_conversation(self, outcome: Any) -> bool:
-        """Best-effort extract continue_conversation from a downstream response."""
-        if outcome is None:
-            return False
-
-        response = getattr(outcome, "response", None)
-        if response is None:
-            return False
-
-        value = getattr(response, "continue_conversation", None)
-        return value is True
 
     def _resolve_origin_area(
         self,

@@ -79,6 +79,8 @@ class AgentAdapter:
         response_type = self._extract_response_type(response)
         error_code = self._extract_error_code(response)
         processed_locally = self._extract_processed_locally(response)
+        downstream_conversation_id = self._extract_conversation_id(response)
+        continue_conversation = self._extract_continue_conversation(response)
         success = self._is_success(response)
         failure = None if success else self._classify_failure(response_text, error_code=error_code, response_type=response_type)
 
@@ -104,6 +106,8 @@ class AgentAdapter:
             response_type=response_type,
             error_code=error_code,
             processed_locally=processed_locally,
+            conversation_id=downstream_conversation_id,
+            continue_conversation=continue_conversation,
         )
 
     def _extract_response_text(self, response: Any) -> str | None:
@@ -148,6 +152,20 @@ class AgentAdapter:
             except Exception:
                 continue
         return None
+
+    def _extract_conversation_id(self, response: Any) -> str | None:
+        try:
+            value = getattr(response, "conversation_id", None)
+            return str(value) if value is not None else None
+        except Exception:
+            return None
+
+    def _extract_continue_conversation(self, response: Any) -> bool | None:
+        try:
+            value = getattr(response, "continue_conversation", None)
+            return value if isinstance(value, bool) else None
+        except Exception:
+            return None
 
     def _is_success(self, response: Any) -> bool:
         response_type = (self._extract_response_type(response) or "").lower()

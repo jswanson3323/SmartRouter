@@ -197,6 +197,10 @@ class ResolutionTrace:
     state_query_local_executed: bool | None = None
     state_query_local_response_text: str | None = None
     state_query_intercepted_during_llm: bool | None = None
+    local_action_detected: bool | None = None
+    local_action_canonical_text: str | None = None
+    local_action_response_text: str | None = None
+    local_action_intercepted_during_llm: bool | None = None
     llm_state_enrichment_applied: bool | None = None
     llm_state_enrichment_targets: list[str] = field(default_factory=list)
     llm_state_enrichment_prompt: str | None = None

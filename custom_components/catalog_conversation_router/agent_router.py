@@ -62,6 +62,19 @@ HA_QUERY_OPENERS = (
     "how is",
     "how s",
 )
+LOCAL_ACTION_PREFIXES = (
+    "turn on",
+    "turn off",
+    "switch on",
+    "switch off",
+    "open",
+    "close",
+    "lock",
+    "unlock",
+    "set",
+    "activate",
+    "deactivate",
+)
 
 
 class AgentRouter:
@@ -163,6 +176,23 @@ class AgentRouter:
                 trace.selected_path = ResolutionPath.LOCAL_STATE_QUERY
                 trace.final_executor = "local"
                 return state_result
+            action_result = await self._try_local_action_during_llm(
+                text=text,
+                language=language,
+                context=context,
+                trace=trace,
+                catalog=catalog,
+                origin_area=resolved_origin_area,
+                origin_super_area=resolved_origin_super_area,
+                device_id=device_id,
+                satellite_id=satellite_id,
+                extra_system_prompt=extra_system_prompt,
+            )
+            if action_result is not None:
+                trace.local_action_intercepted_during_llm = True
+                trace.selected_path = action_result.path
+                trace.final_executor = "local"
+                return action_result
             trace.assist_pipeline_input = text
             trace.rendered_from_pattern = False
             trace.rendered_slots = {}
@@ -757,6 +787,96 @@ class AgentRouter:
         return RouterResult(
             path=ResolutionPath.LOCAL_STATE_QUERY,
             outcome=local_outcome,
+            trace=trace,
+        )
+
+    async def _try_local_action_during_llm(
+        self,
+        *,
+        text: str,
+        language: str,
+        context: Any,
+        trace: ResolutionTrace,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+        device_id: str | None,
+        satellite_id: str | None,
+        extra_system_prompt: str | None,
+    ) -> RouterResult | None:
+        normalized = normalize_text(text)
+        trace.local_action_detected = any(
+            normalized.startswith(prefix) for prefix in LOCAL_ACTION_PREFIXES
+        )
+        if not trace.local_action_detected:
+            return None
+
+        match_result = self._matcher.match(
+            text,
+            catalog,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if match_result.best is not None:
+            second = match_result.top_candidates[1].score if len(match_result.top_candidates) > 1 else 0.0
+            decision = validate_fuzzy_execution(
+                inferred_action=match_result.inferred_action,
+                candidate_action=match_result.best.action,
+                canonical_phrase=match_result.best.canonical_phrase,
+                best_score=match_result.best.score,
+                second_score=second,
+                fuzzy_threshold=self._config.fuzzy_threshold,
+                ambiguity_gap=self._config.ambiguity_gap,
+                high_risk_threshold=self._config.high_risk_threshold,
+            )
+            if decision.allowed:
+                assist_input = match_result.best.canonical_phrase
+                if match_result.best.candidate_type.value == "conversation_target":
+                    matched_pattern = (
+                        (match_result.best.detail or {}).get("matched_sample_phrase_raw")
+                        or match_result.best.canonical_phrase
+                    )
+                    rendered = render_conversation_pattern(
+                        original_utterance=text,
+                        pattern=matched_pattern,
+                    )
+                    assist_input = rendered.text or normalize_text(text)
+                trace.local_action_canonical_text = assist_input
+                fuzzy_outcome = await self._agent_adapter.async_process(
+                    agent_id=self._config.local_agent_id,
+                    text=assist_input,
+                    language=language,
+                    conversation_id=None,
+                    context=context,
+                    device_id=device_id,
+                    satellite_id=satellite_id,
+                    extra_system_prompt=extra_system_prompt,
+                )
+                trace.local_action_response_text = fuzzy_outcome.response_text
+                if fuzzy_outcome.success:
+                    return RouterResult(
+                        path=ResolutionPath.FUZZY_LOCAL,
+                        outcome=fuzzy_outcome,
+                        trace=trace,
+                    )
+
+        trace.local_action_canonical_text = text
+        exact_outcome = await self._agent_adapter.async_process(
+            agent_id=self._config.local_agent_id,
+            text=text,
+            language=language,
+            conversation_id=None,
+            context=context,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=extra_system_prompt,
+        )
+        trace.local_action_response_text = exact_outcome.response_text
+        if not exact_outcome.success:
+            return None
+        return RouterResult(
+            path=ResolutionPath.EXACT_LOCAL,
+            outcome=exact_outcome,
             trace=trace,
         )
 

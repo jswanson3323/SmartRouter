@@ -723,6 +723,54 @@ def test_active_llm_owner_preserved_after_local_state_query() -> None:
     assert llm_adapter.fallback_calls[-1]["conversation_id"] == "downstream-conv-1"
 
 
+def test_active_llm_explicit_local_action_is_intercepted() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target("light.office_drum_light", "Office Drum Light", domain="light", area="Office"),
+    ]
+    agent_adapter = _FakeAgentAdapter([_outcome(True, "Turned on the Office Drum Light")])
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _conversation_result_outcome(True, "LLM should not answer this turn.", continue_conversation=False),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(
+            _MatchResult(
+                best=_Candidate("turn on Office Drum Light"),
+                top=[_Candidate("turn on Office Drum Light")],
+                matched=True,
+            )
+        ),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+    router._active_conversations["outer-action-1"] = types.SimpleNamespace(
+        outer_conversation_id="outer-action-1",
+        executor_type="llm",
+        agent_id="llm",
+        downstream_conversation_id="downstream-conv-1",
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the office drum light",
+            language="en",
+            conversation_id="outer-action-1",
+            context=None,
+        )
+    )
+
+    assert result.path.value == "fuzzy_local"
+    assert agent_adapter.calls[-1]["text"] == "turn on Office Drum Light"
+    assert agent_adapter.calls[-1]["conversation_id"] is None
+    assert llm_adapter.fallback_calls == []
+    assert result.trace.local_action_detected is True
+    assert result.trace.local_action_intercepted_during_llm is True
+
+
 def test_area_domain_state_query_intercepts_to_local_agent() -> None:
     agent_adapter = _FakeAgentAdapter([_outcome(True, "Cabinet Lights and Kitchen Sink Light")])
     router = AgentRouter(

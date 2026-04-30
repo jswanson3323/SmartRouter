@@ -5,12 +5,21 @@ from __future__ import annotations
 
 import logging
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from .catalog import CatalogManager
 from .llm_adapter import LLMAdapter
 from .matcher import FuzzyMatcher
-from .models import ActiveConversationState, EntityTarget, ResolutionPath, ResolutionTrace, RouterConfig, RouterResult
+from .models import (
+    ActiveConversationState,
+    EntityTarget,
+    ParsedStateQuery,
+    ResolutionPath,
+    ResolutionTrace,
+    RouterConfig,
+    RouterResult,
+)
 from .phrase_renderer import render_conversation_pattern
 from .phonetics import normalize_text, tokenize
 from .safety import validate_fuzzy_execution
@@ -41,6 +50,13 @@ TEMPERATURE_WORD_RE = re.compile(r"\btemp(?:e?r?a?t?u?r?e|urature|rature)?\b", r
 BINARY_STATE_ENDING_RE = re.compile(
     r"\b(on|off|open|opened|closed|close|locked|unlocked)\b\s*\??$",
     re.IGNORECASE,
+)
+HA_QUERY_OPENERS = (
+    "what is",
+    "whats",
+    "tell me",
+    "how is",
+    "how s",
 )
 
 
@@ -124,6 +140,25 @@ class AgentRouter:
             trace.continuation_routed_directly = True
 
         if active_state is not None and active_state.executor_type == "llm":
+            state_result = await self._try_local_state_query(
+                text=text,
+                language=language,
+                conversation_id=conversation_id,
+                context=context,
+                trace=trace,
+                catalog=catalog,
+                origin_area=resolved_origin_area,
+                origin_super_area=resolved_origin_super_area,
+                device_id=device_id,
+                satellite_id=satellite_id,
+                extra_system_prompt=extra_system_prompt,
+                preserve_llm_owner=True,
+            )
+            if state_result is not None:
+                trace.state_query_intercepted_during_llm = True
+                trace.selected_path = ResolutionPath.LOCAL_STATE_QUERY
+                trace.final_executor = "local"
+                return state_result
             trace.assist_pipeline_input = text
             trace.rendered_from_pattern = False
             trace.rendered_slots = {}
@@ -210,6 +245,25 @@ class AgentRouter:
                 outcome=local_outcome,
                 trace=trace,
             )
+
+        state_result = await self._try_local_state_query(
+            text=text,
+            language=language,
+            conversation_id=conversation_id,
+            context=context,
+            trace=trace,
+            catalog=catalog,
+            origin_area=resolved_origin_area,
+            origin_super_area=resolved_origin_super_area,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=extra_system_prompt,
+            preserve_llm_owner=False,
+        )
+        if state_result is not None:
+            trace.selected_path = ResolutionPath.LOCAL_STATE_QUERY
+            trace.final_executor = "local"
+            return state_result
 
         match_result = self._matcher.match(
             text,
@@ -600,6 +654,76 @@ class AgentRouter:
         else:
             self._active_conversations.pop(conversation_id, None)
 
+    async def _try_local_state_query(
+        self,
+        *,
+        text: str,
+        language: str,
+        conversation_id: str | None,
+        context: Any,
+        trace: ResolutionTrace,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+        device_id: str | None,
+        satellite_id: str | None,
+        extra_system_prompt: str | None,
+        preserve_llm_owner: bool,
+    ) -> RouterResult | None:
+        parsed = self._parse_state_query(text)
+        trace.state_query_detected = parsed is not None
+        if parsed is None:
+            return None
+
+        trace.state_query_kind = parsed.query_kind
+        trace.state_query_target_phrase = parsed.target_phrase
+        trace.state_query_requested_state = parsed.requested_state
+
+        resolved = self._resolve_state_query_target(
+            parsed=parsed,
+            entities=catalog.entity_targets,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if resolved is None:
+            return None
+
+        canonical_text = self._render_local_state_query(parsed=parsed, resolved=resolved)
+        if not canonical_text:
+            return None
+
+        trace.state_query_canonical_text = canonical_text
+        trace.state_query_fuzzy_match_target = resolved["label"]
+        trace.state_query_fuzzy_match_score = round(resolved["score"], 4)
+
+        local_outcome = await self._agent_adapter.async_process(
+            agent_id=self._config.local_agent_id,
+            text=canonical_text,
+            language=language,
+            conversation_id=None if preserve_llm_owner else conversation_id,
+            context=context,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=extra_system_prompt,
+        )
+        trace.state_query_local_executed = True
+        trace.state_query_local_response_text = local_outcome.response_text
+        if not preserve_llm_owner:
+            self._update_conversation_tracking(
+                conversation_id,
+                local_outcome,
+                executor="local",
+                agent_id=self._config.local_agent_id,
+            )
+        if not local_outcome.success:
+            return None
+
+        return RouterResult(
+            path=ResolutionPath.LOCAL_STATE_QUERY,
+            outcome=local_outcome,
+            trace=trace,
+        )
+
     def _apply_state_enrichment(
         self,
         *,
@@ -686,6 +810,61 @@ class AgentRouter:
             return True
         return len(normalized.split()) <= 6
 
+    def _parse_state_query(self, text: str) -> ParsedStateQuery | None:
+        normalized = self._normalize_temperature_text(normalize_text(text))
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return None
+
+        binary_match = re.match(r"^(is|are)\s+(.+?)\s+(on|off|open|opened|closed|close|locked|unlocked)\??$", normalized)
+        if binary_match:
+            target = re.sub(r"^(the|a|an)\s+", "", binary_match.group(2)).strip()
+            return ParsedStateQuery(
+                query_kind="binary",
+                target_phrase=target,
+                requested_state=binary_match.group(3),
+                normalized_text=normalized,
+            )
+
+        if "temperature" in normalized.split() or "temp" in normalized.split() or re.search(r"\bhow (hot|cold|warm|cool)\b", normalized):
+            target = normalized
+            for opener in HA_QUERY_OPENERS:
+                if target.startswith(opener):
+                    target = target.removeprefix(opener).strip()
+                    break
+            target = re.sub(r"\bthe current temperature\b", "", target).strip()
+            target = re.sub(r"\bcurrent temperature\b", "", target).strip()
+            target = re.sub(r"\btemperature\b", "", target).strip()
+            target = re.sub(r"\btemp\b", "", target).strip()
+            target = re.sub(r"\bhow (hot|cold|warm|cool) is (it|)\b", "", target).strip()
+            target = re.sub(r"^(in|of|for|at)\s+", "", target).strip()
+            target = re.sub(r"^(the|a|an)\s+", "", target).strip()
+            if target:
+                return ParsedStateQuery(
+                    query_kind="temperature",
+                    target_phrase=target,
+                    requested_state=None,
+                    normalized_text=normalized,
+                )
+
+        if any(normalized.startswith(opener) for opener in HA_QUERY_OPENERS) or " state" in normalized or " status" in normalized:
+            target = normalized
+            for opener in HA_QUERY_OPENERS:
+                if target.startswith(opener):
+                    target = target.removeprefix(opener).strip()
+                    break
+            target = re.sub(r"\b(state|status)\b", "", target).strip()
+            target = re.sub(r"^(the|a|an)\s+", "", target).strip()
+            if target:
+                return ParsedStateQuery(
+                    query_kind="status",
+                    target_phrase=target,
+                    requested_state=None,
+                    normalized_text=normalized,
+                )
+
+        return None
+
     def _classify_enrichment_query(self, text: str) -> str:
         normalized = self._normalize_temperature_text(normalize_text(text))
         if "temperature" in normalized.split() or "temp" in normalized.split():
@@ -724,6 +903,136 @@ class AgentRouter:
             if len(resolved) >= 3:
                 break
         return resolved
+
+    def _resolve_state_query_target(
+        self,
+        *,
+        parsed: ParsedStateQuery,
+        entities: list[EntityTarget],
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> dict[str, Any] | None:
+        target = parsed.target_phrase
+        target_tokens = tokenize(target)
+        if not target_tokens:
+            return None
+
+        candidates: list[tuple[float, int, dict[str, Any]]] = []
+        normalized_target = normalize_text(target)
+        normalized_target_tokens = set(target_tokens)
+        for entity in entities:
+            if parsed.query_kind == "temperature" and not self._entity_supports_temperature(entity):
+                continue
+
+            entity_tokens = set(entity.tokens)
+            alias_tokens = [set(tokenize(alias)) for alias in entity.aliases]
+            overlap = len(normalized_target_tokens & entity_tokens)
+            alias_overlap = max((len(normalized_target_tokens & alias) for alias in alias_tokens), default=0)
+            entity_area_tokens = set(tokenize(entity.area or ""))
+            area_overlap = len(normalized_target_tokens & entity_area_tokens)
+            label = entity.name
+            similarity = SequenceMatcher(a=normalized_target, b=entity.normalized_name).ratio()
+            if not overlap and not alias_overlap and not area_overlap and similarity < 0.58:
+                continue
+
+            score = 0.0
+            score += 0.45 * (overlap / max(1, len(normalized_target_tokens)))
+            score += 0.20 * (alias_overlap / max(1, len(normalized_target_tokens)))
+            score += 0.20 * similarity
+            score += 0.15 * (area_overlap / max(1, len(normalized_target_tokens)))
+            locality = self._entity_locality_rank(
+                entity=entity,
+                origin_area=origin_area,
+                origin_super_area=origin_super_area,
+            )
+            score += 0.08 * locality
+            if parsed.query_kind == "temperature":
+                score += self._temperature_entity_bonus(entity)
+            candidates.append(
+                (
+                    min(score, 1.0),
+                    locality,
+                    {
+                        "kind": "entity",
+                        "entity": entity,
+                        "label": label,
+                        "score": min(score, 1.0),
+                    },
+                )
+            )
+
+        if parsed.query_kind == "temperature":
+            area_match = self._resolve_temperature_area_target(parsed.target_phrase, entities)
+            if area_match is not None:
+                candidates.append((area_match["score"], 3, area_match))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        best = candidates[0][2]
+        best_score = candidates[0][0]
+        if best_score < 0.68:
+            return None
+        if len(candidates) > 1:
+            second_score = candidates[1][0]
+            second_locality = candidates[1][1]
+            if second_score >= (best_score - 0.06) and second_locality == candidates[0][1]:
+                return None
+        return best
+
+    def _resolve_temperature_area_target(
+        self,
+        target_phrase: str,
+        entities: list[EntityTarget],
+    ) -> dict[str, Any] | None:
+        normalized_target = normalize_text(target_phrase)
+        target_tokens = set(tokenize(normalized_target))
+        if not target_tokens:
+            return None
+
+        best: dict[str, Any] | None = None
+        best_score = 0.0
+        seen_areas: set[str] = set()
+        for entity in entities:
+            if not self._entity_supports_temperature(entity) or not entity.area:
+                continue
+            area_key = normalize_text(entity.area)
+            if area_key in seen_areas:
+                continue
+            seen_areas.add(area_key)
+            area_tokens = set(tokenize(entity.area))
+            overlap = len(target_tokens & area_tokens)
+            if not overlap:
+                continue
+            score = overlap / max(1, len(target_tokens))
+            if score > best_score:
+                best_score = score
+                best = {
+                    "kind": "area",
+                    "area": entity.area,
+                    "label": entity.area,
+                    "score": min(0.72 + (0.2 * score), 0.92),
+                }
+        return best
+
+    def _render_local_state_query(
+        self,
+        *,
+        parsed: ParsedStateQuery,
+        resolved: dict[str, Any],
+    ) -> str | None:
+        if resolved["kind"] == "area" and parsed.query_kind == "temperature":
+            return f"what is the current temperature in {resolved['area']}"
+
+        entity: EntityTarget = resolved["entity"]
+        if parsed.query_kind == "binary" and parsed.requested_state:
+            return f"is the {entity.name} {parsed.requested_state}"
+        if parsed.query_kind == "temperature":
+            if entity.area and parsed.target_phrase == normalize_text(entity.area):
+                return f"what is the current temperature in {entity.area}"
+            return f"what is the current temperature of {entity.name}"
+        return f"what is the state of {entity.name}"
 
     def _extract_enrichment_segments(self, text: str, *, query_kind: str) -> list[str]:
         normalized = self._normalize_temperature_text(normalize_text(text))

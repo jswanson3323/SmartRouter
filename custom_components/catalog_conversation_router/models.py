@@ -11,6 +11,7 @@ from typing import Any
 class ResolutionPath(StrEnum):
     """Pipeline resolution path."""
 
+    LOCAL_STATE_QUERY = "local_state_query"
     EXACT_LOCAL = "exact_local"
     FUZZY_LOCAL = "fuzzy_local"
     LLM_TRANSLATED_LOCAL = "llm_translated_local"
@@ -186,6 +187,16 @@ class ResolutionTrace:
     active_conversation_agent_id: str | None = None
     downstream_conversation_id: str | None = None
     continuation_routed_directly: bool | None = None
+    state_query_detected: bool | None = None
+    state_query_kind: str | None = None
+    state_query_target_phrase: str | None = None
+    state_query_requested_state: str | None = None
+    state_query_canonical_text: str | None = None
+    state_query_fuzzy_match_target: str | None = None
+    state_query_fuzzy_match_score: float | None = None
+    state_query_local_executed: bool | None = None
+    state_query_local_response_text: str | None = None
+    state_query_intercepted_during_llm: bool | None = None
     llm_state_enrichment_applied: bool | None = None
     llm_state_enrichment_targets: list[str] = field(default_factory=list)
     llm_state_enrichment_prompt: str | None = None
@@ -254,6 +265,16 @@ class ActiveConversationState:
     downstream_conversation_id: str | None
     started_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
     last_updated_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
+
+
+@dataclass(slots=True)
+class ParsedStateQuery:
+    """Parsed state/status query aligned to Home Assistant-style grammar."""
+
+    query_kind: str
+    target_phrase: str
+    requested_state: str | None
+    normalized_text: str
 
 
 @dataclass(slots=True)

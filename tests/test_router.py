@@ -565,7 +565,7 @@ def test_first_turn_llm_state_enrichment_applies_for_temperature_query() -> None
         config=_config(),
         catalog_manager=catalog_manager,
         matcher=_FakeMatcher(_MatchResult()),
-        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        agent_adapter=_FakeAgentAdapter([_outcome(True, "The temperature is 76 F.")]),
         llm_adapter=llm_adapter,
         hass=hass,
     )
@@ -579,11 +579,11 @@ def test_first_turn_llm_state_enrichment_applies_for_temperature_query() -> None
         )
     )
 
-    assert result.path.value == "llm_fallback"
-    prompt = llm_adapter.fallback_calls[-1]["extra_system_prompt"]
-    assert "current temperature" in prompt
-    assert "Answer only about the resolved target or targets below." in prompt
-    assert result.trace.llm_state_enrichment_applied is True
+    assert result.path.value == "local_state_query"
+    assert router._agent_adapter.calls[-1]["text"] == "what is the current temperature in Great Room"
+    assert result.trace.state_query_detected is True
+    assert result.trace.state_query_kind == "temperature"
+    assert result.trace.state_query_fuzzy_match_target == "Great Room"
 
 
 def test_active_llm_state_enrichment_handles_binary_state_query() -> None:
@@ -606,7 +606,7 @@ def test_active_llm_state_enrichment_handles_binary_state_query() -> None:
         config=_config(),
         catalog_manager=catalog_manager,
         matcher=_FakeMatcher(_MatchResult()),
-        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        agent_adapter=_FakeAgentAdapter([_outcome(True, "The office light is on.")]),
         llm_adapter=llm_adapter,
         hass=hass,
     )
@@ -626,11 +626,101 @@ def test_active_llm_state_enrichment_handles_binary_state_query() -> None:
         )
     )
 
-    assert result.path.value == "llm_fallback"
-    prompt = llm_adapter.fallback_calls[-1]["extra_system_prompt"]
-    assert "Office Light: on" in prompt
-    assert "answer whether the requested state is true or false" in prompt.lower()
-    assert result.trace.llm_state_enrichment_applied is True
+    assert result.path.value == "local_state_query"
+    assert router._agent_adapter.calls[-1]["text"] == "is the Office Light on"
+    assert llm_adapter.fallback_calls == []
+    assert result.trace.state_query_detected is True
+    assert result.trace.state_query_kind == "binary"
+    assert result.trace.state_query_fuzzy_match_target == "Office Light"
+    assert result.trace.state_query_intercepted_during_llm is True
+
+
+def test_fuzzy_state_query_recovers_line_to_light() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target("light.office", "Office Light", domain="light", area="Office"),
+    ]
+    agent_adapter = _FakeAgentAdapter([_outcome(True, "The office light is on.")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=types.SimpleNamespace(
+            states=_FakeStates(
+                {
+                    "light.office": types.SimpleNamespace(state="on", attributes={}),
+                }
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="Is the office line on?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "local_state_query"
+    assert agent_adapter.calls[-1]["text"] == "is the Office Light on"
+    assert result.trace.state_query_fuzzy_match_target == "Office Light"
+
+
+def test_active_llm_owner_preserved_after_local_state_query() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target("light.office", "Office Light", domain="light", area="Office"),
+    ]
+    agent_adapter = _FakeAgentAdapter([_outcome(True, "The office light is on.")])
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _conversation_result_outcome(True, "Because it changed since earlier.", continue_conversation=False),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=types.SimpleNamespace(
+            states=_FakeStates(
+                {
+                    "light.office": types.SimpleNamespace(state="on", attributes={}),
+                }
+            )
+        ),
+    )
+    router._active_conversations["outer-owner-1"] = types.SimpleNamespace(
+        outer_conversation_id="outer-owner-1",
+        executor_type="llm",
+        agent_id="llm",
+        downstream_conversation_id="downstream-conv-1",
+    )
+
+    first = asyncio.run(
+        router.async_route(
+            text="Is the office light on?",
+            language="en",
+            conversation_id="outer-owner-1",
+            context=None,
+        )
+    )
+    assert first.path.value == "local_state_query"
+
+    second = asyncio.run(
+        router.async_route(
+            text="Why was that different earlier?",
+            language="en",
+            conversation_id="outer-owner-1",
+            context=None,
+        )
+    )
+    assert second.path.value == "llm_fallback"
+    assert llm_adapter.fallback_calls[-1]["conversation_id"] == "downstream-conv-1"
 
 
 def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None:

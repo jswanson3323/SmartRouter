@@ -186,6 +186,9 @@ class ResolutionTrace:
     active_conversation_agent_id: str | None = None
     downstream_conversation_id: str | None = None
     continuation_routed_directly: bool | None = None
+    llm_state_enrichment_applied: bool | None = None
+    llm_state_enrichment_targets: list[str] = field(default_factory=list)
+    llm_state_enrichment_prompt: str | None = None
     effective_area_hint: str | None = None
     effective_super_area_hint: str | None = None
     failure_category: str | None = None

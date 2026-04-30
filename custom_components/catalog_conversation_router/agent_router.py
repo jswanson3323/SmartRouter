@@ -10,13 +10,31 @@ from typing import Any
 from .catalog import CatalogManager
 from .llm_adapter import LLMAdapter
 from .matcher import FuzzyMatcher
-from .models import ActiveConversationState, ResolutionPath, ResolutionTrace, RouterConfig, RouterResult
+from .models import ActiveConversationState, EntityTarget, ResolutionPath, ResolutionTrace, RouterConfig, RouterResult
 from .phrase_renderer import render_conversation_pattern
-from .phonetics import normalize_text
+from .phonetics import normalize_text, tokenize
 from .safety import validate_fuzzy_execution
 
 _LOGGER = logging.getLogger(__name__)
 SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
+STATUS_QUERY_HINTS = (
+    "status",
+    "state",
+    "what about",
+    "tell me about",
+    "can you tell me about",
+    "what is",
+    "whats",
+    "is",
+    "are",
+    "temperature",
+    "temp",
+)
+STATE_ENRICHMENT_INTRO = (
+    "Router-resolved live state for this turn. "
+    "Use this live state as the source of truth for the current answer. "
+    "Prefer these resolved entities over broader inferred context."
+)
 
 
 class AgentRouter:
@@ -110,6 +128,23 @@ class AgentRouter:
                 "notes": "active_llm_conversation",
             }
             trace.llm_translated_local_executed = False
+            llm_system_prompt = extra_system_prompt
+            state_enrichment = self._build_llm_state_enrichment(
+                text=text,
+                catalog=catalog,
+                origin_area=resolved_origin_area,
+                origin_super_area=resolved_origin_super_area,
+            )
+            if state_enrichment:
+                trace.llm_state_enrichment_applied = True
+                trace.llm_state_enrichment_targets = state_enrichment["targets"]
+                trace.llm_state_enrichment_prompt = state_enrichment["prompt"]
+                llm_system_prompt = self._merge_system_prompts(
+                    extra_system_prompt,
+                    state_enrichment["prompt"],
+                )
+            else:
+                trace.llm_state_enrichment_applied = False
             if self._config.llm_fallback_enabled:
                 if _should_execute_branch():
                     llm_outcome = await self._llm_adapter.async_final_fallback(
@@ -120,7 +155,7 @@ class AgentRouter:
                         context=context,
                         device_id=device_id,
                         satellite_id=satellite_id,
-                        extra_system_prompt=extra_system_prompt,
+                        extra_system_prompt=llm_system_prompt,
                     )
                 else:
                     llm_outcome = None
@@ -558,6 +593,261 @@ class AgentRouter:
             )
         else:
             self._active_conversations.pop(conversation_id, None)
+
+    def _build_llm_state_enrichment(
+        self,
+        *,
+        text: str,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> dict[str, Any] | None:
+        """Build compact state context for active LLM turns when matches are clear."""
+        if self._hass is None or not self._looks_like_status_followup(text):
+            return None
+
+        resolved = self._resolve_state_enrichment_entities(
+            text=text,
+            catalog=catalog,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if not resolved:
+            return None
+
+        lines: list[str] = [STATE_ENRICHMENT_INTRO]
+        target_names: list[str] = []
+        for entity in resolved:
+            rendered = self._render_entity_live_state(entity)
+            if not rendered:
+                continue
+            lines.append(f"- {rendered}")
+            target_names.append(entity.name)
+
+        if not target_names:
+            return None
+
+        return {
+            "targets": target_names,
+            "prompt": "\n".join(lines),
+        }
+
+    def _looks_like_status_followup(self, text: str) -> bool:
+        normalized = normalize_text(text)
+        if not normalized:
+            return False
+        if any(normalized.startswith(prefix) for prefix in STATUS_QUERY_HINTS):
+            return True
+        if any(token in normalized.split() for token in ("light", "lights", "fan", "temperature", "temp", "thermostat", "lock", "door", "cover")):
+            return True
+        return len(normalized.split()) <= 6
+
+    def _resolve_state_enrichment_entities(
+        self,
+        *,
+        text: str,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> list[EntityTarget]:
+        segments = self._extract_enrichment_segments(text)
+        if not segments:
+            return []
+
+        resolved: list[EntityTarget] = []
+        used_ids: set[str] = set()
+        for segment in segments:
+            entity = self._resolve_best_enrichment_entity(
+                segment=segment,
+                entities=catalog.entity_targets,
+                origin_area=origin_area,
+                origin_super_area=origin_super_area,
+            )
+            if entity is None or entity.entity_id in used_ids:
+                continue
+            resolved.append(entity)
+            used_ids.add(entity.entity_id)
+            if len(resolved) >= 3:
+                break
+        return resolved
+
+    def _extract_enrichment_segments(self, text: str) -> list[str]:
+        normalized = normalize_text(text)
+        for prefix in (
+            "can you tell me about ",
+            "tell me about ",
+            "what about ",
+            "what is ",
+            "whats ",
+            "status of ",
+            "the status of ",
+        ):
+            if normalized.startswith(prefix):
+                normalized = normalized.removeprefix(prefix).strip()
+                break
+
+        normalized = re.sub(r"\b(can you|could you|please)\b", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return []
+
+        raw_segments = re.split(r"\b(?:and|,)\b", normalized)
+        segments: list[str] = []
+        for raw in raw_segments:
+            segment = raw.strip()
+            if not segment:
+                continue
+            segment = re.sub(r"^(about|the|a|an)\s+", "", segment).strip()
+            segment = re.sub(r"\?$", "", segment).strip()
+            if segment:
+                segments.append(segment)
+        if not segments:
+            return []
+        return segments[:3]
+
+    def _resolve_best_enrichment_entity(
+        self,
+        *,
+        segment: str,
+        entities: list[EntityTarget],
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> EntityTarget | None:
+        segment_normalized = normalize_text(segment)
+        segment_tokens = tokenize(segment_normalized)
+        if not segment_tokens:
+            return None
+
+        ranked: list[tuple[float, int, int, EntityTarget]] = []
+        for entity in entities:
+            score = self._enrichment_entity_score(
+                segment_normalized=segment_normalized,
+                segment_tokens=segment_tokens,
+                entity=entity,
+                origin_area=origin_area,
+                origin_super_area=origin_super_area,
+            )
+            if score is None:
+                continue
+            locality_rank = self._entity_locality_rank(
+                entity=entity,
+                origin_area=origin_area,
+                origin_super_area=origin_super_area,
+            )
+            ranked.append((score, locality_rank, len(entity.tokens), entity))
+
+        if not ranked:
+            return None
+
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        best_score, best_locality, _, best_entity = ranked[0]
+        if best_score < 0.72:
+            return None
+        if len(ranked) > 1:
+            second_score, second_locality, _, _ = ranked[1]
+            if second_score >= (best_score - 0.08) and second_locality == best_locality:
+                return None
+        return best_entity
+
+    def _enrichment_entity_score(
+        self,
+        *,
+        segment_normalized: str,
+        segment_tokens: list[str],
+        entity: EntityTarget,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> float | None:
+        entity_tokens = entity.tokens
+        if not entity_tokens:
+            return None
+
+        overlap = len(set(segment_tokens) & set(entity_tokens))
+        if overlap == 0:
+            return None
+
+        token_coverage = overlap / max(1, len(set(segment_tokens)))
+        entity_coverage = overlap / max(1, len(set(entity_tokens)))
+        phrase_score = 1.0 if segment_normalized == entity.normalized_name else 0.0
+        contains_score = 1.0 if segment_normalized in entity.normalized_name else 0.0
+        score = max(
+            phrase_score,
+            (0.65 * token_coverage) + (0.20 * entity_coverage) + (0.15 * contains_score),
+        )
+
+        if self._entity_locality_rank(
+            entity=entity,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        ) == 2:
+            score += 0.06
+        elif self._entity_locality_rank(
+            entity=entity,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        ) == 1:
+            score += 0.03
+
+        return min(score, 1.0)
+
+    def _entity_locality_rank(
+        self,
+        *,
+        entity: EntityTarget,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> int:
+        if origin_area and entity.area and normalize_text(entity.area) == normalize_text(origin_area):
+            return 2
+        if (
+            origin_super_area
+            and entity.super_area
+            and normalize_text(entity.super_area) == normalize_text(origin_super_area)
+        ):
+            return 1
+        return 0
+
+    def _render_entity_live_state(self, entity: EntityTarget) -> str | None:
+        states = getattr(self._hass, "states", None)
+        if states is None or not hasattr(states, "get"):
+            return None
+
+        state = states.get(entity.entity_id)
+        if state is None:
+            return None
+
+        attrs = getattr(state, "attributes", {}) or {}
+        value = getattr(state, "state", None)
+        if value is None:
+            return None
+
+        summary = f"{entity.name}: {value}"
+        if entity.domain == "climate":
+            current_temp = attrs.get("current_temperature")
+            unit = attrs.get("temperature_unit")
+            if current_temp is not None:
+                summary = f"{entity.name}: current temperature {current_temp}{unit or ''}, mode {value}"
+        elif entity.domain == "sensor":
+            unit = attrs.get("unit_of_measurement")
+            device_class = attrs.get("device_class")
+            if unit:
+                summary = f"{entity.name}: {value}{unit}"
+            elif device_class:
+                summary = f"{entity.name}: {value} ({device_class})"
+        elif entity.domain in {"light", "switch", "fan", "lock", "cover"}:
+            summary = f"{entity.name}: {value}"
+        return summary
+
+    def _merge_system_prompts(
+        self,
+        base_prompt: str | None,
+        addition: str | None,
+    ) -> str | None:
+        if not addition:
+            return base_prompt
+        if not base_prompt:
+            return addition
+        return f"{base_prompt.strip()}\n\n{addition.strip()}"
 
     def _resolve_origin_area(
         self,

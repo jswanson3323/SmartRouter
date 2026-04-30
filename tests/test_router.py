@@ -8,6 +8,7 @@ from custom_components.catalog_conversation_router.agent_router import AgentRout
 from custom_components.catalog_conversation_router.models import (
     CandidateType,
     Catalog,
+    EntityTarget,
     CatalogMetadata,
     LocalAgentOutcome,
     RouterConfig,
@@ -83,6 +84,14 @@ class _MatchResult:
         self.effective_super_area_hint = None
 
 
+class _FakeStates:
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def get(self, entity_id):
+        return self._mapping.get(entity_id)
+
+
 class _Candidate:
     def __init__(self, phrase, score=0.91, candidate_type=CandidateType.ENTITY_COMMAND, detail=None):
         self.candidate_id = "light.kitchen"
@@ -118,6 +127,34 @@ def _config() -> RouterConfig:
         catalog_auto_refresh_enabled=True,
         high_risk_threshold=0.96,
         max_llm_candidates=20,
+    )
+
+
+def _entity_target(
+    entity_id: str,
+    name: str,
+    *,
+    domain: str,
+    area: str | None = None,
+    super_area: str | None = None,
+    aliases: list[str] | None = None,
+):
+    normalized_name = name.lower()
+    tokens = normalized_name.split()
+    return EntityTarget(
+        entity_id=entity_id,
+        name=name,
+        normalized_name=normalized_name,
+        aliases=aliases or [],
+        domain=domain,
+        area=area,
+        super_area=super_area,
+        floor=None,
+        device_name=None,
+        exposed=True,
+        capabilities=[],
+        tokens=tokens,
+        phonetic_tokens=tokens,
     )
 
 
@@ -375,6 +412,122 @@ def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
     assert second.trace.llm_translation_summary is not None
     assert second.trace.llm_translation_summary["notes"] == "active_llm_conversation"
     assert second.trace.downstream_conversation_id == "downstream-conv-1"
+
+
+def test_active_llm_conversation_adds_targeted_state_enrichment() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target("light.office", "Office Light", domain="light", area="Office"),
+        _entity_target("light.teen_room", "Teen Room Light", domain="light", area="Teen Room"),
+    ]
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _conversation_result_outcome(True, "The Office Light is on.", continue_conversation=True),
+    )
+    hass = types.SimpleNamespace(
+        states=_FakeStates(
+            {
+                "light.office": types.SimpleNamespace(state="on", attributes={}),
+                "light.teen_room": types.SimpleNamespace(state="off", attributes={}),
+            }
+        )
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=hass,
+    )
+
+    first = asyncio.run(
+        router.async_route(
+            text="ask me a question",
+            language="en",
+            conversation_id="outer-enrich-1",
+            context=None,
+        )
+    )
+    assert first.path.value == "llm_fallback"
+
+    second = asyncio.run(
+        router.async_route(
+            text="the office light and the teen room light",
+            language="en",
+            conversation_id="outer-enrich-1",
+            context=None,
+        )
+    )
+
+    assert second.path.value == "llm_fallback"
+    prompt = llm_adapter.fallback_calls[-1]["extra_system_prompt"]
+    assert "Router-resolved live state for this turn" in prompt
+    assert "Office Light: on" in prompt
+    assert "Teen Room Light: off" in prompt
+    assert second.trace.llm_state_enrichment_applied is True
+    assert second.trace.llm_state_enrichment_targets == ["Office Light", "Teen Room Light"]
+
+
+def test_active_llm_state_enrichment_prefers_origin_area() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target(
+            "light.office_hall",
+            "Hall Light",
+            domain="light",
+            area="Office",
+            super_area="Great Room",
+        ),
+        _entity_target(
+            "light.great_room_hall",
+            "Hall Light",
+            domain="light",
+            area="Great Room",
+            super_area="Great Room",
+        ),
+    ]
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _conversation_result_outcome(True, "The Hall Light is on.", continue_conversation=True),
+    )
+    hass = types.SimpleNamespace(
+        states=_FakeStates(
+            {
+                "light.office_hall": types.SimpleNamespace(state="on", attributes={}),
+                "light.great_room_hall": types.SimpleNamespace(state="off", attributes={}),
+            }
+        )
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=hass,
+    )
+    router._active_conversations["outer-enrich-2"] = types.SimpleNamespace(
+        outer_conversation_id="outer-enrich-2",
+        executor_type="llm",
+        agent_id="llm",
+        downstream_conversation_id="downstream-conv-1",
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="the hall light",
+            language="en",
+            conversation_id="outer-enrich-2",
+            context=None,
+            origin_area="Office",
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    prompt = llm_adapter.fallback_calls[-1]["extra_system_prompt"]
+    assert "Hall Light: on" in prompt
+    assert "Hall Light: off" not in prompt
 
 
 def test_active_local_conversation_bypasses_fuzzy_and_returns_to_local() -> None:

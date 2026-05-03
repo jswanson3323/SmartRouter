@@ -65,6 +65,17 @@ class IntegrationRuntime:
     unsub_refresh: callable | None = None
 
 
+def _available_agent_ids(hass: HomeAssistant) -> set[str]:
+    """Return currently loaded config entry ids that can back conversation agents."""
+    available: set[str] = set()
+    for entry in hass.config_entries.async_entries():
+        state_name = getattr(getattr(entry, "state", None), "name", "")
+        if state_name and state_name != "LOADED":
+            continue
+        available.add(entry.entry_id)
+    return available
+
+
 def _entry_to_config(entry: ConfigEntry) -> RouterConfig:
     merged = {**entry.data, **entry.options}
     return RouterConfig(
@@ -108,6 +119,21 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up config entry runtime."""
     cfg = _entry_to_config(entry)
+    available_agents = _available_agent_ids(hass)
+    if cfg.local_agent_id not in {"homeassistant", "__default__", "default"} and cfg.local_agent_id not in available_agents:
+        _LOGGER.warning(
+            "Configured local agent_id %s is not currently available; falling back to Home Assistant local agent",
+            cfg.local_agent_id,
+        )
+        cfg.local_agent_id = "homeassistant"
+    if cfg.llm_agent_id not in available_agents:
+        _LOGGER.warning(
+            "Configured llm_agent_id %s is not currently available; disabling LLM translation and LLM fallback until a valid agent is selected",
+            cfg.llm_agent_id,
+        )
+        cfg.llm_translate_enabled = False
+        cfg.llm_fallback_enabled = False
+
     catalog_manager = CatalogManager(hass, cfg)
     await catalog_manager.async_rebuild()
 

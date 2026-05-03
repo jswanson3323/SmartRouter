@@ -105,6 +105,11 @@ def parse_manual_targets(raw_json: str) -> list[dict[str, Any]]:
     return [item for item in payload if isinstance(item, dict)]
 
 
+def _option_values(options: list[selector.SelectOptionDict]) -> set[str]:
+    """Return the available selector values."""
+    return {str(option["value"]) for option in options}
+
+
 async def async_get_local_agent_options(hass) -> list[selector.SelectOptionDict]:
     """Get local-capable conversation agent options."""
     options: list[selector.SelectOptionDict] = [
@@ -184,10 +189,16 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
         if user_input is not None:
             try:
                 config = build_router_config(user_input)
+                local_values = _option_values(local_options)
+                llm_values = _option_values(llm_options)
                 if not config[CONF_LOCAL_AGENT_ID] or not config[CONF_LLM_AGENT_ID]:
                     errors["base"] = "agent_required"
                 elif config[CONF_LLM_AGENT_ID] == NO_AGENT_PLACEHOLDER:
                     errors["base"] = "no_llm_agents_found"
+                elif config[CONF_LOCAL_AGENT_ID] not in local_values:
+                    errors["base"] = "invalid_local_agent"
+                elif config[CONF_LLM_AGENT_ID] not in llm_values:
+                    errors["base"] = "invalid_llm_agent"
                 elif config[CONF_LOCAL_AGENT_ID] == config[CONF_LLM_AGENT_ID]:
                     errors["base"] = "agents_must_differ"
                 else:
@@ -283,6 +294,8 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                 }
                 data.pop("manual_targets_json", None)
                 normalized = build_router_config(data)
+                local_values = _option_values(local_options)
+                llm_values = _option_values(llm_options)
 
                 if (
                     not normalized[CONF_LOCAL_AGENT_ID]
@@ -291,6 +304,10 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                     errors["base"] = "agent_required"
                 elif normalized[CONF_LLM_AGENT_ID] == NO_AGENT_PLACEHOLDER:
                     errors["base"] = "no_llm_agents_found"
+                elif normalized[CONF_LOCAL_AGENT_ID] not in local_values:
+                    errors["base"] = "invalid_local_agent"
+                elif normalized[CONF_LLM_AGENT_ID] not in llm_values:
+                    errors["base"] = "invalid_llm_agent"
                 elif normalized[CONF_LOCAL_AGENT_ID] == normalized[CONF_LLM_AGENT_ID]:
                     errors["base"] = "agents_must_differ"
                 else:
@@ -302,6 +319,7 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             data_schema=self._build_options_schema(
                 current_manual=current_manual,
+                local_options=local_options,
                 local_selector=local_selector,
                 llm_selector=llm_selector,
                 llm_options=llm_options,
@@ -313,26 +331,37 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
         self,
         *,
         current_manual: list[dict[str, Any]],
+        local_options: list[selector.SelectOptionDict],
         local_selector,
         llm_selector,
         llm_options: list[selector.SelectOptionDict],
     ) -> vol.Schema:
         """Build options form schema."""
+        local_values = _option_values(local_options)
+        llm_values = _option_values(llm_options)
+        local_default = self._entry.options.get(
+            CONF_LOCAL_AGENT_ID,
+            self._entry.data.get(CONF_LOCAL_AGENT_ID, BUILTIN_LOCAL_AGENT_ID),
+        )
+        if local_default not in local_values:
+            local_default = BUILTIN_LOCAL_AGENT_ID if BUILTIN_LOCAL_AGENT_ID in local_values else next(iter(local_values))
+
+        llm_default = self._entry.options.get(
+            CONF_LLM_AGENT_ID,
+            self._entry.data.get(CONF_LLM_AGENT_ID, llm_options[0]["value"]),
+        )
+        if llm_default not in llm_values:
+            llm_default = llm_options[0]["value"]
+
         return vol.Schema(
             {
                 vol.Required(
                     CONF_LOCAL_AGENT_ID,
-                    default=self._entry.options.get(
-                        CONF_LOCAL_AGENT_ID,
-                        self._entry.data.get(CONF_LOCAL_AGENT_ID, BUILTIN_LOCAL_AGENT_ID),
-                    ),
+                    default=local_default,
                 ): local_selector,
                 vol.Required(
                     CONF_LLM_AGENT_ID,
-                    default=self._entry.options.get(
-                        CONF_LLM_AGENT_ID,
-                        self._entry.data.get(CONF_LLM_AGENT_ID, llm_options[0]["value"]),
-                    ),
+                    default=llm_default,
                 ): llm_selector,
                 vol.Optional(
                     CONF_LANGUAGE,

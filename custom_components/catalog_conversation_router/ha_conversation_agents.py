@@ -34,8 +34,8 @@ def get_registered_conversation_agents(hass: Any) -> list[ConversationAgentDescr
 
     _append_manager_agents(hass, descriptors, seen)
     _append_conversation_entities(hass, descriptors, seen)
-    if not descriptors:
-        _append_config_entry_fallback(hass, descriptors, seen)
+    _append_conversation_subentry_entries(hass, descriptors, seen)
+    _append_config_entry_fallback(hass, descriptors, seen)
 
     descriptors.sort(key=lambda item: item.label.lower())
     return descriptors
@@ -155,6 +155,41 @@ def _append_config_entry_fallback(
         if domain == DOMAIN:
             continue
         if domain not in LLM_AGENT_DOMAINS and "conversation" not in domain:
+            continue
+        agent_id = entry.entry_id
+        if agent_id in seen:
+            continue
+        seen.add(agent_id)
+        descriptors.append(
+            ConversationAgentDescriptor(
+                agent_id=agent_id,
+                label=entry.title or domain.replace("_", " ").title(),
+                domain=domain,
+            )
+        )
+
+
+def _append_conversation_subentry_entries(
+    hass: Any,
+    descriptors: list[ConversationAgentDescriptor],
+    seen: set[str],
+) -> None:
+    """Append conversation-capable config entries that expose conversation subentries."""
+    for entry in hass.config_entries.async_entries():
+        state_name = getattr(getattr(entry, "state", None), "name", "")
+        if state_name and state_name != "LOADED":
+            continue
+        domain = entry.domain
+        if domain == DOMAIN:
+            continue
+        subentries = getattr(entry, "subentries", None)
+        if not subentries:
+            continue
+        has_conversation_subentry = any(
+            getattr(subentry, "subentry_type", None) == "conversation"
+            for subentry in subentries.values()
+        )
+        if not has_conversation_subentry:
             continue
         agent_id = entry.entry_id
         if agent_id in seen:

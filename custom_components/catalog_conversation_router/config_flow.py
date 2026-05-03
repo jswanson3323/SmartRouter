@@ -35,29 +35,13 @@ from .const import (
     DEFAULT_MAX_LLM_CANDIDATES,
     DOMAIN,
 )
+from .ha_conversation_agents import (
+    get_registered_conversation_agents,
+    get_registered_llm_agents,
+)
 
 BUILTIN_LOCAL_AGENT_ID = "homeassistant"
 NO_AGENT_PLACEHOLDER = "__no_agent_available__"
-
-CONVERSATION_AGENT_DOMAINS = {
-    "assist",
-    "conversation",
-    "openai_conversation",
-    "google_generative_ai_conversation",
-    "chatgpt",
-    "ollama",
-    "llama_conversation",
-    "assist_satellite",
-}
-
-LLM_AGENT_DOMAINS = {
-    "openai_conversation",
-    "google_generative_ai_conversation",
-    "ollama",
-    "anthropic",
-    "llama_conversation",
-    "chatgpt",
-}
 
 
 def build_router_config(data: dict[str, Any]) -> dict[str, Any]:
@@ -117,21 +101,16 @@ async def async_get_local_agent_options(hass) -> list[selector.SelectOptionDict]
     ]
     seen: set[str] = {BUILTIN_LOCAL_AGENT_ID}
 
-    for entry in hass.config_entries.async_entries():
-        state_name = getattr(getattr(entry, "state", None), "name", "")
-        if state_name and state_name != "LOADED":
+    for descriptor in get_registered_conversation_agents(hass):
+        if descriptor.agent_id in seen:
             continue
-        domain = entry.domain
-        if domain not in CONVERSATION_AGENT_DOMAINS and "conversation" not in domain:
-            continue
-
-        agent_id = entry.entry_id
-        if agent_id in seen:
-            continue
-        seen.add(agent_id)
-
-        title = entry.title or domain.replace("_", " ").title()
-        options.append(selector.SelectOptionDict(label=title, value=agent_id))
+        seen.add(descriptor.agent_id)
+        options.append(
+            selector.SelectOptionDict(
+                label=descriptor.label,
+                value=descriptor.agent_id,
+            )
+        )
 
     options.sort(key=lambda item: item["label"].lower())
     return options
@@ -142,22 +121,16 @@ async def async_get_llm_agent_options(hass) -> list[selector.SelectOptionDict]:
     options: list[selector.SelectOptionDict] = []
     seen: set[str] = set()
 
-    for entry in hass.config_entries.async_entries():
-        state_name = getattr(getattr(entry, "state", None), "name", "")
-        if state_name and state_name != "LOADED":
+    for descriptor in get_registered_llm_agents(hass):
+        if descriptor.agent_id in seen:
             continue
-
-        domain = entry.domain
-        if domain not in LLM_AGENT_DOMAINS and "conversation" not in domain:
-            continue
-
-        agent_id = entry.entry_id
-        if agent_id in seen:
-            continue
-        seen.add(agent_id)
-
-        title = entry.title or domain.replace("_", " ").title()
-        options.append(selector.SelectOptionDict(label=title, value=agent_id))
+        seen.add(descriptor.agent_id)
+        options.append(
+            selector.SelectOptionDict(
+                label=descriptor.label,
+                value=descriptor.agent_id,
+            )
+        )
 
     options.sort(key=lambda item: item["label"].lower())
     if not options:

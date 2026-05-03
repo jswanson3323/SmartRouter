@@ -138,11 +138,15 @@ The matcher includes a few special cases for conversation targets:
    - `llm_agent_id`
    - thresholds and toggles as needed
 
+The agent dropdowns are populated from the conversation agents that Home Assistant has actually registered and can call at runtime. The router excludes its own agent from those pickers to avoid recursive routing.
+
 ## Configuration Options
 
 Required:
 - `local_agent_id`
 - `llm_agent_id`
+
+These should be selected from the integration UI pickers. They are callable Home Assistant conversation agent IDs, not arbitrary config entry IDs.
 
 Optional:
 - `language` (default `en`)

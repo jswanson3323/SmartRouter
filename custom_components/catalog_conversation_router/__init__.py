@@ -45,6 +45,10 @@ from .const import (
     DOMAIN,
 )
 from .conversation import CatalogRouterConversationAgent, async_register_agent, async_unregister_agent
+from .ha_conversation_agents import (
+    get_registered_conversation_agents,
+    get_registered_llm_agents,
+)
 from .llm_adapter import LLMAdapter
 from .local_agent_adapter import AgentAdapter
 from .matcher import FuzzyMatcher
@@ -66,14 +70,13 @@ class IntegrationRuntime:
 
 
 def _available_agent_ids(hass: HomeAssistant) -> set[str]:
-    """Return currently loaded config entry ids that can back conversation agents."""
-    available: set[str] = set()
-    for entry in hass.config_entries.async_entries():
-        state_name = getattr(getattr(entry, "state", None), "name", "")
-        if state_name and state_name != "LOADED":
-            continue
-        available.add(entry.entry_id)
-    return available
+    """Return currently callable conversation agent ids."""
+    return {descriptor.agent_id for descriptor in get_registered_conversation_agents(hass)}
+
+
+def _available_llm_agent_ids(hass: HomeAssistant) -> set[str]:
+    """Return currently callable LLM-capable conversation agent ids."""
+    return {descriptor.agent_id for descriptor in get_registered_llm_agents(hass)}
 
 
 def _entry_to_config(entry: ConfigEntry) -> RouterConfig:
@@ -120,19 +123,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up config entry runtime."""
     cfg = _entry_to_config(entry)
     available_agents = _available_agent_ids(hass)
+    available_llm_agents = _available_llm_agent_ids(hass)
     if cfg.local_agent_id not in {"homeassistant", "__default__", "default"} and cfg.local_agent_id not in available_agents:
         _LOGGER.warning(
             "Configured local agent_id %s is not currently available; falling back to Home Assistant local agent",
             cfg.local_agent_id,
         )
         cfg.local_agent_id = "homeassistant"
-    if cfg.llm_agent_id not in available_agents:
-        _LOGGER.warning(
-            "Configured llm_agent_id %s is not currently available; disabling LLM translation and LLM fallback until a valid agent is selected",
-            cfg.llm_agent_id,
-        )
-        cfg.llm_translate_enabled = False
-        cfg.llm_fallback_enabled = False
+    if cfg.llm_agent_id not in available_llm_agents:
+        if len(available_llm_agents) == 1:
+            fallback_llm_agent_id = next(iter(available_llm_agents))
+            _LOGGER.warning(
+                "Configured llm_agent_id %s is not currently callable; using the only available LLM agent %s for this runtime",
+                cfg.llm_agent_id,
+                fallback_llm_agent_id,
+            )
+            cfg.llm_agent_id = fallback_llm_agent_id
+        else:
+            _LOGGER.warning(
+                "Configured llm_agent_id %s is not currently callable; disabling LLM translation and LLM fallback until a valid agent is selected. Available LLM agents: %s",
+                cfg.llm_agent_id,
+                sorted(available_llm_agents),
+            )
+            cfg.llm_translate_enabled = False
+            cfg.llm_fallback_enabled = False
 
     catalog_manager = CatalogManager(hass, cfg)
     await catalog_manager.async_rebuild()

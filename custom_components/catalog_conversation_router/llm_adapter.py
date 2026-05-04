@@ -5,14 +5,19 @@ from __future__ import annotations
 import json
 import logging
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 from .matcher import CANONICAL_ACTION_TEXT
 from .models import CandidateType, Catalog, LLMTranslationResult
+from .phonetics import normalize_text, tokenize
 
 _LOGGER = logging.getLogger(__name__)
 
 JSON_BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
+MAX_ENTITY_PROMPT_CANDIDATES = 8
+MAX_CONVERSATION_PROMPT_CANDIDATES = 6
+MAX_LOCALITY_PROMPT_CANDIDATES = 4
 
 class LLMAdapter:
     """Build prompts and parse structured translation output."""
@@ -136,33 +141,36 @@ class LLMAdapter:
         origin_area: str | None,
         origin_super_area: str | None = None,
     ) -> str:
-        entity_candidates = [e.name for e in catalog.entity_targets[:max_candidates]]
-        conversation_candidates = [
-            t.display_name for t in catalog.conversation_targets[:max_candidates]
-        ]
-        area_entity_candidates = [
-            e.name
-            for e in catalog.entity_targets
-            if origin_area
-            and e.area
-            and origin_area.strip().lower() == e.area.strip().lower()
-        ][:max_candidates]
+        entity_candidates = self._select_entity_candidates(
+            utterance=utterance,
+            catalog=catalog,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+            limit=min(max_candidates, MAX_ENTITY_PROMPT_CANDIDATES),
+        )
+        conversation_candidates = self._select_conversation_candidates(
+            utterance=utterance,
+            catalog=catalog,
+            limit=min(max_candidates, MAX_CONVERSATION_PROMPT_CANDIDATES),
+        )
+        area_entity_candidates = self._select_locality_entity_candidates(
+            utterance=utterance,
+            catalog=catalog,
+            area=origin_area,
+            limit=MAX_LOCALITY_PROMPT_CANDIDATES,
+        )
         origin_super_area = origin_super_area or self._infer_super_area_from_origin_area(
             origin_area=origin_area,
             catalog=catalog,
         )
-        super_area_entity_candidates = [
-            e.name
-            for e in catalog.entity_targets
-            if origin_super_area
-            and e.super_area
-            and origin_super_area.strip().lower() == e.super_area.strip().lower()
-            and not (
-                origin_area
-                and e.area
-                and origin_area.strip().lower() == e.area.strip().lower()
-            )
-        ][:max_candidates]
+        super_area_entity_candidates = self._select_locality_entity_candidates(
+            utterance=utterance,
+            catalog=catalog,
+            area=origin_super_area,
+            area_attr="super_area",
+            limit=MAX_LOCALITY_PROMPT_CANDIDATES,
+            exclude_area=origin_area,
+        )
 
         schema = {
             "mode": "translate_for_local | fallback_answer",
@@ -188,11 +196,105 @@ class LLMAdapter:
             f"Origin SuperArea: {origin_super_area!r}. "
             f"Origin-area entity targets: {area_entity_candidates}. "
             f"Origin-SuperArea entity targets: {super_area_entity_candidates}. "
-            f"Entity targets: {entity_candidates}. "
-            f"Conversation targets: {conversation_candidates}. "
+            f"Relevant entity targets: {entity_candidates}. "
+            f"Relevant conversation targets: {conversation_candidates}. "
             "Return ONLY a single JSON object and nothing else. Do not include explanations, prefixes, suffixes, or text before or after the JSON. If unsure, return mode=fallback_answer with canonical_text=null. JSON schema: "
             f"{json.dumps(schema)}"
         )
+
+    def _select_entity_candidates(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+        limit: int,
+    ) -> list[str]:
+        normalized = normalize_text(utterance)
+        utterance_tokens = set(tokenize(utterance))
+        scored: list[tuple[float, str]] = []
+        for entity in catalog.entity_targets:
+            entity_token_set = set(entity.tokens)
+            overlap = len(utterance_tokens & entity_token_set)
+            similarity = SequenceMatcher(a=normalized, b=entity.normalized_name).ratio()
+            locality_bonus = 0.0
+            if origin_area and entity.area and origin_area.strip().lower() == entity.area.strip().lower():
+                locality_bonus = 0.15
+            elif (
+                origin_super_area
+                and entity.super_area
+                and origin_super_area.strip().lower() == entity.super_area.strip().lower()
+            ):
+                locality_bonus = 0.08
+            score = overlap * 0.4 + similarity * 0.6 + locality_bonus
+            if overlap == 0 and similarity < 0.24 and locality_bonus == 0.0:
+                continue
+            scored.append((score, entity.name))
+        scored.sort(key=lambda item: (-item[0], item[1].lower()))
+        names = [name for _, name in scored[:limit]]
+        if names:
+            return names
+        return [entity.name for entity in catalog.entity_targets[:limit]]
+
+    def _select_conversation_candidates(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+        limit: int,
+    ) -> list[str]:
+        normalized = normalize_text(utterance)
+        utterance_tokens = set(tokenize(utterance))
+        scored: list[tuple[float, str]] = []
+        for target in catalog.conversation_targets:
+            token_set = set(target.tokens)
+            overlap = len(utterance_tokens & token_set)
+            similarity = SequenceMatcher(a=normalized, b=target.normalized_name).ratio()
+            score = overlap * 0.45 + similarity * 0.55
+            if overlap == 0 and similarity < 0.24:
+                continue
+            scored.append((score, target.display_name))
+        scored.sort(key=lambda item: (-item[0], item[1].lower()))
+        names = [name for _, name in scored[:limit]]
+        if names:
+            return names
+        return [target.display_name for target in catalog.conversation_targets[:limit]]
+
+    def _select_locality_entity_candidates(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+        area: str | None,
+        limit: int,
+        area_attr: str = "area",
+        exclude_area: str | None = None,
+    ) -> list[str]:
+        if not area:
+            return []
+        normalized_area = area.strip().lower()
+        normalized_exclude_area = exclude_area.strip().lower() if exclude_area else None
+        normalized = normalize_text(utterance)
+        utterance_tokens = set(tokenize(utterance))
+        scored: list[tuple[float, str]] = []
+        for entity in catalog.entity_targets:
+            entity_area = getattr(entity, area_attr, None)
+            if not entity_area or entity_area.strip().lower() != normalized_area:
+                continue
+            if (
+                area_attr == "super_area"
+                and normalized_exclude_area
+                and entity.area
+                and entity.area.strip().lower() == normalized_exclude_area
+            ):
+                continue
+            overlap = len(utterance_tokens & set(entity.tokens))
+            similarity = SequenceMatcher(a=normalized, b=entity.normalized_name).ratio()
+            score = overlap * 0.45 + similarity * 0.55
+            scored.append((score, entity.name))
+        scored.sort(key=lambda item: (-item[0], item[1].lower()))
+        return [name for _, name in scored[:limit]]
 
     def _infer_super_area_from_origin_area(
         self,

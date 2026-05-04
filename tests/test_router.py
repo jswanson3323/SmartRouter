@@ -941,3 +941,32 @@ def test_origin_super_area_resolves_from_area_label_ids(monkeypatch) -> None:
         context=types.SimpleNamespace(device_id=None),
     )
     assert result == "Great Room"
+
+
+def test_open_domain_request_skips_translation_and_exact_local() -> None:
+    llm_adapter = _FakeLLMAdapter(_Translation(False, None), _outcome(True, text="boil eggs like this"))
+    agent_adapter = _FakeAgentAdapter([])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="how do i boil eggs?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert llm_adapter.translate_calls == []
+    assert len(llm_adapter.fallback_calls) == 1
+    assert agent_adapter.calls == []
+    assert result.trace.llm_translation_summary is not None
+    assert result.trace.llm_translation_summary["notes"] == "direct_llm_only"

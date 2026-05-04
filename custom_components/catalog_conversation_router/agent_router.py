@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 
 from .catalog import CatalogManager
+from .ha_conversation_agents import get_registered_llm_agents
 from .llm_adapter import LLMAdapter
 from .matcher import FuzzyMatcher
 from .models import (
@@ -75,6 +77,50 @@ LOCAL_ACTION_PREFIXES = (
     "activate",
     "deactivate",
 )
+ACTIVE_CONVERSATION_TTL = timedelta(hours=6)
+MAX_ACTIVE_CONVERSATIONS = 256
+OPEN_DOMAIN_PREFIXES = (
+    "how do i",
+    "how to",
+    "why is",
+    "why are",
+    "tell me about",
+    "explain",
+    "write",
+    "summarize",
+    "help me",
+)
+SMART_HOME_HINT_TOKENS = {
+    "light",
+    "lights",
+    "lamp",
+    "fan",
+    "switch",
+    "thermostat",
+    "temperature",
+    "temp",
+    "climate",
+    "door",
+    "garage",
+    "lock",
+    "cover",
+    "speaker",
+    "tv",
+    "scene",
+    "script",
+    "alarm",
+    "vacuum",
+    "kitchen",
+    "office",
+    "bedroom",
+    "guest",
+    "great",
+    "garage",
+    "laundry",
+    "gym",
+    "pool",
+    "spa",
+}
 
 
 class AgentRouter:
@@ -114,6 +160,7 @@ class AgentRouter:
         extra_system_prompt: str | None = None,
     ) -> RouterResult:
         """Run deterministic routing pipeline with bounded attempts."""
+        self._prune_active_conversations()
         _LOGGER.debug("ROUTER START: text=%r, device_id=%r, satellite_id=%r", text, device_id, satellite_id)
         catalog = self._catalog.get_catalog()
         resolved_origin_area = origin_area or self._resolve_origin_area(device_id=device_id, satellite_id=satellite_id, context=context)
@@ -214,8 +261,11 @@ class AgentRouter:
             )
             if self._config.llm_fallback_enabled:
                 if _should_execute_branch():
+                    runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
+                        active_state.agent_id
+                    )
                     llm_outcome = await self._llm_adapter.async_final_fallback(
-                        llm_agent_id=active_state.agent_id,
+                        llm_agent_id=runtime_llm_agent_id,
                         utterance=text,
                         language=language,
                         conversation_id=active_state.downstream_conversation_id,
@@ -231,7 +281,7 @@ class AgentRouter:
                     conversation_id,
                     llm_outcome,
                     executor="llm",
-                    agent_id=active_state.agent_id,
+                    agent_id=runtime_llm_agent_id if llm_outcome is not None else active_state.agent_id,
                 )
                 trace.selected_path = ResolutionPath.LLM_FALLBACK
                 trace.final_executor = "llm"
@@ -460,19 +510,36 @@ class AgentRouter:
                 _LOGGER.debug("Fuzzy candidate rejected: %s", decision.reason)
 
         # 2) LLM translation to local
-        should_run_llm_translation = self._config.llm_translate_enabled and selected_path is None
+        direct_llm_only = self._should_bypass_local_pipeline_for_llm(
+            text=text,
+            catalog=catalog,
+        )
+        should_run_llm_translation = (
+            self._config.llm_translate_enabled
+            and selected_path is None
+            and not direct_llm_only
+        )
         if not should_run_llm_translation:
             trace.llm_translation_summary = {
                 "mode": "skipped",
                 "confidence": 0.0,
                 "target_type": "unknown",
                 "valid": False,
-                "notes": "skipped_due_to_fuzzy_match" if selected_path == ResolutionPath.FUZZY_LOCAL else "skipped",
+                "notes": (
+                    "skipped_due_to_fuzzy_match"
+                    if selected_path == ResolutionPath.FUZZY_LOCAL
+                    else "direct_llm_only"
+                    if direct_llm_only
+                    else "skipped"
+                ),
             }
             trace.llm_translated_local_executed = False
         if should_run_llm_translation:
+            runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
+                self._config.llm_agent_id
+            )
             translation = await self._llm_adapter.async_translate_for_local(
-                llm_agent_id=self._config.llm_agent_id,
+                llm_agent_id=runtime_llm_agent_id,
                 utterance=text,
                 language=language,
                 catalog=catalog,
@@ -540,70 +607,76 @@ class AgentRouter:
                         )
 
         # 3) raw local attempt
-        _LOGGER.debug("ROUTER PATH: EXACT_LOCAL → calling adapter with input=%r", text)
-        if _should_execute_branch():
-            exact = await self._agent_adapter.async_process(
-                agent_id=self._config.local_agent_id,
-                text=text,
-                language=language,
-                conversation_id=conversation_id,
-                context=context,
-                device_id=device_id,
-                satellite_id=satellite_id,
-            )
-        else:
-            exact = None
-        if exact is not None:
-            _LOGGER.debug(
-                "EXACT LOCAL: success=%s response=%r processed_locally=%s",
-                exact.success,
-                exact.response_text,
-                exact.processed_locally,
-            )
-            trace.exact_local_executed = True
-            trace.exact_local_outcome = "success" if exact.success else "failed"
-            trace.exact_local_response_text = exact.response_text
-            trace.exact_local_response_type = exact.response_type
-            trace.exact_local_error_code = exact.error_code
-            trace.exact_local_processed_locally = exact.processed_locally
-            trace.failure_category = (
-                exact.failure_category.value if exact.failure_category is not None else None
-            )
-            self._update_conversation_tracking(
-                conversation_id,
-                exact,
-                executor="local",
-                agent_id=self._config.local_agent_id,
-            )
-        else:
+        exact = None
+        if direct_llm_only:
             trace.exact_local_executed = False
             trace.exact_local_outcome = "skipped"
+        else:
+            _LOGGER.debug("ROUTER PATH: EXACT_LOCAL → calling adapter with input=%r", text)
+            if _should_execute_branch():
+                exact = await self._agent_adapter.async_process(
+                    agent_id=self._config.local_agent_id,
+                    text=text,
+                    language=language,
+                    conversation_id=conversation_id,
+                    context=context,
+                    device_id=device_id,
+                    satellite_id=satellite_id,
+                )
+            if exact is not None:
+                _LOGGER.debug(
+                    "EXACT LOCAL: success=%s response=%r processed_locally=%s",
+                    exact.success,
+                    exact.response_text,
+                    exact.processed_locally,
+                )
+                trace.exact_local_executed = True
+                trace.exact_local_outcome = "success" if exact.success else "failed"
+                trace.exact_local_response_text = exact.response_text
+                trace.exact_local_response_type = exact.response_type
+                trace.exact_local_error_code = exact.error_code
+                trace.exact_local_processed_locally = exact.processed_locally
+                trace.failure_category = (
+                    exact.failure_category.value if exact.failure_category is not None else None
+                )
+                self._update_conversation_tracking(
+                    conversation_id,
+                    exact,
+                    executor="local",
+                    agent_id=self._config.local_agent_id,
+                )
+            else:
+                trace.exact_local_executed = False
+                trace.exact_local_outcome = "skipped"
 
-        if exact is not None and exact.success and exact.processed_locally is True:
-            _LOGGER.debug("ROUTER DECISION: EXACT_LOCAL")
-            if selected_path is None:
-                trace.assist_pipeline_input = text
-                trace.rendered_from_pattern = False
-                trace.rendered_slots = {}
-                trace.selected_path = ResolutionPath.EXACT_LOCAL
-                trace.final_executor = "local"
-                selected_path = ResolutionPath.EXACT_LOCAL
-                selected_outcome = exact
-            if not debug_collect_all:
-                return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
+            if exact is not None and exact.success and exact.processed_locally is True:
+                _LOGGER.debug("ROUTER DECISION: EXACT_LOCAL")
+                if selected_path is None:
+                    trace.assist_pipeline_input = text
+                    trace.rendered_from_pattern = False
+                    trace.rendered_slots = {}
+                    trace.selected_path = ResolutionPath.EXACT_LOCAL
+                    trace.final_executor = "local"
+                    selected_path = ResolutionPath.EXACT_LOCAL
+                    selected_outcome = exact
+                if not debug_collect_all:
+                    return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
 
-        if exact is not None and exact.success and exact.processed_locally is not True:
-            _LOGGER.debug(
-                "EXACT LOCAL rejected: success=%s processed_locally=%s response=%r",
-                exact.success,
-                exact.processed_locally,
-                exact.response_text,
-            )
+            if exact is not None and exact.success and exact.processed_locally is not True:
+                _LOGGER.debug(
+                    "EXACT LOCAL rejected: success=%s processed_locally=%s response=%r",
+                    exact.success,
+                    exact.processed_locally,
+                    exact.response_text,
+                )
 
         # 4) final direct llm fallback
         if self._config.llm_fallback_enabled:
             if _should_execute_branch():
                 _LOGGER.debug("ROUTER DECISION: LLM_FALLBACK (calling LLM)")
+                runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
+                    self._config.llm_agent_id
+                )
                 llm_system_prompt = self._apply_state_enrichment(
                     trace=trace,
                     text=text,
@@ -613,7 +686,7 @@ class AgentRouter:
                     extra_system_prompt=extra_system_prompt,
                 )
                 llm_outcome = await self._llm_adapter.async_final_fallback(
-                    llm_agent_id=self._config.llm_agent_id,
+                    llm_agent_id=runtime_llm_agent_id,
                     utterance=text,
                     language=language,
                     conversation_id=conversation_id,
@@ -629,7 +702,7 @@ class AgentRouter:
                 conversation_id,
                 llm_outcome,
                 executor="llm",
-                agent_id=self._config.llm_agent_id,
+                agent_id=runtime_llm_agent_id if llm_outcome is not None else self._config.llm_agent_id,
             )
             _LOGGER.debug(
                 "LLM FALLBACK RESPONSE: %r",
@@ -685,8 +758,83 @@ class AgentRouter:
                 downstream_conversation_id=downstream_conversation_id,
                 started_at=started_at,
             )
+            self._enforce_active_conversation_limit()
         else:
             self._active_conversations.pop(conversation_id, None)
+
+    def _resolve_runtime_llm_agent_id(self, configured_agent_id: str) -> str:
+        """Resolve the best callable LLM agent id at request time."""
+        descriptors = get_registered_llm_agents(self._hass)
+        available_ids = {descriptor.agent_id for descriptor in descriptors}
+        if configured_agent_id in available_ids:
+            return configured_agent_id
+        if len(descriptors) == 1:
+            fallback = descriptors[0].agent_id
+            _LOGGER.info(
+                "Configured llm_agent_id %s is not currently callable; using runtime fallback agent %s",
+                configured_agent_id,
+                fallback,
+            )
+            return fallback
+        return configured_agent_id
+
+    def _prune_active_conversations(self) -> None:
+        """Drop stale active continuation state."""
+        now = datetime.now(tz=UTC)
+        stale_ids = [
+            conversation_id
+            for conversation_id, state in self._active_conversations.items()
+            if self._is_state_stale(state, now)
+        ]
+        for conversation_id in stale_ids:
+            self._active_conversations.pop(conversation_id, None)
+
+    def _is_state_stale(self, state: ActiveConversationState, now: datetime) -> bool:
+        """Return True when continuation state is older than the TTL."""
+        try:
+            last_updated = datetime.fromisoformat(state.last_updated_at)
+        except Exception:
+            return True
+        if last_updated.tzinfo is None:
+            last_updated = last_updated.replace(tzinfo=UTC)
+        return now - last_updated > ACTIVE_CONVERSATION_TTL
+
+    def _enforce_active_conversation_limit(self) -> None:
+        """Bound the active continuation map size."""
+        overflow = len(self._active_conversations) - MAX_ACTIVE_CONVERSATIONS
+        if overflow <= 0:
+            return
+        sorted_items = sorted(
+            self._active_conversations.items(),
+            key=lambda item: item[1].last_updated_at,
+        )
+        for conversation_id, _ in sorted_items[:overflow]:
+            self._active_conversations.pop(conversation_id, None)
+
+    def _should_bypass_local_pipeline_for_llm(self, *, text: str, catalog) -> bool:
+        """Return True when an utterance looks open-domain and should skip translation/local probes."""
+        normalized = normalize_text(text)
+        if not normalized:
+            return False
+        if self._parse_state_query(text) is not None:
+            return False
+        if any(normalized.startswith(prefix) for prefix in LOCAL_ACTION_PREFIXES):
+            return False
+
+        utterance_tokens = set(tokenize(normalized))
+        if SMART_HOME_HINT_TOKENS & utterance_tokens:
+            return False
+
+        for entity in catalog.entity_targets:
+            if utterance_tokens & set(entity.tokens):
+                return False
+            if entity.area and utterance_tokens & set(tokenize(entity.area)):
+                return False
+        for target in catalog.conversation_targets:
+            if utterance_tokens & set(target.tokens):
+                return False
+
+        return any(normalized.startswith(prefix) for prefix in OPEN_DOMAIN_PREFIXES) or len(utterance_tokens) >= 4
 
     async def _try_local_state_query(
         self,

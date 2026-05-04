@@ -141,12 +141,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             cfg.llm_agent_id = fallback_llm_agent_id
         else:
             _LOGGER.warning(
-                "Configured llm_agent_id %s is not currently callable; disabling LLM translation and LLM fallback until a valid agent is selected. Available LLM agents: %s",
+                "Configured llm_agent_id %s is not currently callable during setup; leaving LLM features enabled and retrying resolution at request time. Available LLM agents right now: %s",
                 cfg.llm_agent_id,
                 sorted(available_llm_agents),
             )
-            cfg.llm_translate_enabled = False
-            cfg.llm_fallback_enabled = False
 
     catalog_manager = CatalogManager(hass, cfg)
     await catalog_manager.async_rebuild()

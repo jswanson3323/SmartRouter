@@ -359,7 +359,7 @@ def test_final_fallback_path() -> None:
     assert result.path.value == "llm_fallback"
     assert llm_adapter.fallback_calls[-1]["llm_agent_id"] == "llm"
     assert llm_adapter.fallback_calls[-1]["language"] == "en"
-    assert llm_adapter.fallback_calls[-1]["conversation_id"] == "conv-1"
+    assert llm_adapter.fallback_calls[-1]["conversation_id"] is None
     assert llm_adapter.fallback_calls[-1]["context"] is context
     assert llm_adapter.fallback_calls[-1]["device_id"] == "device-123"
     assert llm_adapter.fallback_calls[-1]["satellite_id"] == "assist_satellite.kitchen"
@@ -1048,7 +1048,7 @@ def test_open_domain_request_returns_streaming_fallback_request() -> None:
     assert result.path.value == "llm_fallback"
     assert result.streaming_request is not None
     assert result.streaming_request.utterance == "how do i boil eggs?"
-    assert result.streaming_request.conversation_id == "outer-conv-1"
+    assert result.streaming_request.conversation_id is None
     assert result.streaming_request.extra_system_prompt is None
     assert llm_adapter.translate_calls == []
     assert llm_adapter.fallback_calls == []

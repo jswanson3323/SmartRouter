@@ -745,6 +745,7 @@ class AgentRouter:
                     origin_super_area=resolved_origin_super_area,
                     extra_system_prompt=extra_system_prompt,
                 )
+                fallback_conversation_id = self._resolve_initial_llm_fallback_conversation_id()
                 if allow_streaming_llm_fallback:
                     trace.llm_fallback_stream_attempted = True
                     trace.llm_fallback_stream_supported = None
@@ -757,7 +758,7 @@ class AgentRouter:
                             llm_agent_id=runtime_llm_agent_id,
                             utterance=text,
                             language=language,
-                            conversation_id=conversation_id,
+                            conversation_id=fallback_conversation_id,
                             context=context,
                             device_id=device_id,
                             satellite_id=satellite_id,
@@ -769,7 +770,7 @@ class AgentRouter:
                     llm_agent_id=runtime_llm_agent_id,
                     utterance=text,
                     language=language,
-                    conversation_id=conversation_id,
+                    conversation_id=fallback_conversation_id,
                     context=context,
                     device_id=device_id,
                     satellite_id=satellite_id,
@@ -1200,6 +1201,10 @@ class AgentRouter:
         )
         trace.llm_fallback_prompt_chars = len(fallback_prompt) if fallback_prompt else 0
         return fallback_prompt
+
+    def _resolve_initial_llm_fallback_conversation_id(self) -> str | None:
+        """Start first-turn LLM fallback fresh to avoid replaying outer chat history."""
+        return None
 
     def _build_llm_state_enrichment(
         self,

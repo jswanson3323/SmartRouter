@@ -209,6 +209,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = runtime
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await _async_migrate_assist_pipeline_engine_ids(
+        hass,
+        old_engine_id=entry.entry_id,
+        new_engine_id=conv_agent.entity_id,
+    )
     _LOGGER.info(
         "Catalog router runtime ready for entry %s: local_agent_id=%s llm_agent_id=%s available_llm_agents=%s runtime_count=%s",
         entry.entry_id,
@@ -256,3 +261,50 @@ async def _async_teardown_runtime(
             runtime.unsub_refresh()
         except Exception:
             _LOGGER.exception("Failed to unsubscribe refresh listener for entry %s", entry.entry_id)
+
+
+async def _async_migrate_assist_pipeline_engine_ids(
+    hass: HomeAssistant,
+    *,
+    old_engine_id: str,
+    new_engine_id: str,
+) -> None:
+    """Migrate stored Assist pipelines from legacy manager ids to entity ids."""
+    if old_engine_id == new_engine_id:
+        return
+    try:
+        from homeassistant.components import assist_pipeline
+    except Exception:
+        return
+
+    try:
+        pipelines = assist_pipeline.async_get_pipelines(hass)
+    except Exception:
+        _LOGGER.exception("Failed to load Assist pipelines for conversation engine migration")
+        return
+
+    migrated = 0
+    for pipeline in pipelines:
+        if getattr(pipeline, "conversation_engine", None) != old_engine_id:
+            continue
+        try:
+            await assist_pipeline.async_update_pipeline(
+                hass,
+                pipeline,
+                conversation_engine=new_engine_id,
+            )
+            migrated += 1
+        except Exception:
+            _LOGGER.exception(
+                "Failed to migrate Assist pipeline %s from %s to %s",
+                getattr(pipeline, "id", "<unknown>"),
+                old_engine_id,
+                new_engine_id,
+            )
+    if migrated:
+        _LOGGER.warning(
+            "Migrated %s Assist pipeline(s) from legacy conversation engine %s to %s",
+            migrated,
+            old_engine_id,
+            new_engine_id,
+        )

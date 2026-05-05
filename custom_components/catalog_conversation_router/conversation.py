@@ -21,8 +21,6 @@ try:  # pragma: no cover - exercised in HA runtime
         ConversationInput,
         ConversationResult,
         async_get_result_from_chat_log,
-        async_set_agent,
-        async_unset_agent,
     )
     from homeassistant.helpers.intent import IntentResponse
 
@@ -75,8 +73,8 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
 
     @property
     def id(self) -> str:
-        """Stable callable agent id for Assist pipeline and conversation manager."""
-        return self._entry_id
+        """Stable conversation entity id for Assist pipeline selection."""
+        return self.entity_id
 
     @property
     def unique_id(self) -> str:

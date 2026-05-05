@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
@@ -73,6 +74,7 @@ class IntegrationRuntime:
     router: AgentRouter
     conversation_agent: CatalogRouterConversationAgent
     legacy_agent_alias: object | None = None
+    migration_task: asyncio.Task | None = None
     unsub_refresh: callable | None = None
 
 
@@ -222,11 +224,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = runtime
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await async_register_agent_alias(hass, entry, legacy_agent_alias)
-    await _async_migrate_assist_pipeline_engine_ids(
-        hass,
-        old_engine_id=entry.entry_id,
-        new_engine_id=conv_agent.entity_id,
+    runtime.migration_task = hass.async_create_task(
+        _async_retry_assist_pipeline_engine_migration(
+            hass,
+            old_engine_id=entry.entry_id,
+            new_engine_id=conv_agent.entity_id,
+        ),
+        name=f"catalog_router_pipeline_migration_{entry.entry_id}",
     )
+    registered_agent_ids = _available_agent_ids(hass)
+    if entry.entry_id not in registered_agent_ids and conv_agent.entity_id not in registered_agent_ids:
+        _LOGGER.warning(
+            "Catalog router agent did not appear in callable conversation agents immediately after setup. legacy_id=%s entity_id=%s available=%s",
+            entry.entry_id,
+            conv_agent.entity_id,
+            sorted(registered_agent_ids),
+        )
     _LOGGER.info(
         "Catalog router runtime ready for entry %s: local_agent_id=%s llm_agent_id=%s available_llm_agents=%s runtime_count=%s",
         entry.entry_id,
@@ -269,6 +282,8 @@ async def _async_teardown_runtime(
     """Tear down a runtime defensively."""
     if remove_from_store:
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    if runtime.migration_task is not None and not runtime.migration_task.done():
+        runtime.migration_task.cancel()
     try:
         await async_unregister_agent_alias(hass, entry)
     except Exception:
@@ -285,20 +300,22 @@ async def _async_migrate_assist_pipeline_engine_ids(
     *,
     old_engine_id: str,
     new_engine_id: str,
-) -> None:
+) -> bool:
     """Migrate stored Assist pipelines from legacy manager ids to entity ids."""
     if old_engine_id == new_engine_id:
-        return
+        return True
     try:
         from homeassistant.components import assist_pipeline
     except Exception:
-        return
+        return False
 
     try:
+        if getattr(assist_pipeline, "KEY_ASSIST_PIPELINE", None) not in hass.data:
+            return False
         pipelines = assist_pipeline.async_get_pipelines(hass)
     except Exception:
         _LOGGER.exception("Failed to load Assist pipelines for conversation engine migration")
-        return
+        return False
 
     migrated = 0
     for pipeline in pipelines:
@@ -325,3 +342,27 @@ async def _async_migrate_assist_pipeline_engine_ids(
             old_engine_id,
             new_engine_id,
         )
+    return True
+
+
+async def _async_retry_assist_pipeline_engine_migration(
+    hass: HomeAssistant,
+    *,
+    old_engine_id: str,
+    new_engine_id: str,
+) -> None:
+    """Retry Assist pipeline migration until the assist pipeline store is ready."""
+    for delay_s in (0, 5, 15, 30, 60):
+        if delay_s:
+            await asyncio.sleep(delay_s)
+        ready = await _async_migrate_assist_pipeline_engine_ids(
+            hass,
+            old_engine_id=old_engine_id,
+            new_engine_id=new_engine_id,
+        )
+        if ready:
+            return
+    _LOGGER.warning(
+        "Assist pipeline storage was not ready for conversation engine migration after retries; legacy engine id %s may remain configured until the next reload",
+        old_engine_id,
+    )

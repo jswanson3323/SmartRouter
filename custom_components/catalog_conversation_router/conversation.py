@@ -468,8 +468,8 @@ class CatalogRouterLegacyAgentAlias(AbstractConversationAgent):
         return self._legacy_agent_id
 
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
-        """Delegate legacy manager calls through the entity agent."""
-        return await self._entity_agent.async_process(user_input)
+        """Delegate legacy manager calls through the streaming-capable entity path."""
+        return await self._entity_agent.internal_async_process(user_input)
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:

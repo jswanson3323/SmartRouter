@@ -49,7 +49,7 @@ def get_registered_llm_agents(hass: Any) -> list[ConversationAgentDescriptor]:
         label = descriptor.label.lower()
         if (
             domain in LLM_AGENT_DOMAINS
-            or "conversation" in domain
+            or (domain != "conversation" and "conversation" in domain)
             or any(token in label for token in ("openai", "ollama", "anthropic", "llama", "qwen"))
         ):
             agents.append(descriptor)

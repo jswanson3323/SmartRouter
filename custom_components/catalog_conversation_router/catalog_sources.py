@@ -195,6 +195,11 @@ def _read_yaml_file(path: Path) -> Any:
         return None
 
 
+async def _async_read_yaml_file(hass: Any, path: Path) -> Any:
+    """Read YAML file off the event loop."""
+    return await hass.async_add_executor_job(_read_yaml_file, path)
+
+
 class EntityCatalogSource:
     """Build entity target catalog from Home Assistant state + registries."""
 
@@ -559,7 +564,7 @@ class ConversationTargetSource:
         """File-based discovery for intent_script.yaml."""
         targets: list[ConversationTarget] = []
         config_path = Path(hass.config.path("intent_script.yaml"))
-        data = _read_yaml_file(config_path)
+        data = await _async_read_yaml_file(hass, config_path)
 
         _LOGGER.debug(
             "Intent script YAML discovery: path=%s exists=%s loaded=%s",
@@ -654,7 +659,7 @@ class ConversationTargetSource:
         """YAML-based discovery for automations, including blueprint-backed instances."""
         targets: list[ConversationTarget] = []
         automations_path = Path(hass.config.path("automations.yaml"))
-        data = _read_yaml_file(automations_path)
+        data = await _async_read_yaml_file(hass, automations_path)
 
         _LOGGER.debug(
             "Automation YAML discovery: path=%s exists=%s loaded=%s",

@@ -232,14 +232,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ),
         name=f"catalog_router_pipeline_migration_{entry.entry_id}",
     )
-    registered_agent_ids = _available_agent_ids(hass)
-    if entry.entry_id not in registered_agent_ids and conv_agent.entity_id not in registered_agent_ids:
-        _LOGGER.warning(
-            "Catalog router agent did not appear in callable conversation agents immediately after setup. legacy_id=%s entity_id=%s available=%s",
-            entry.entry_id,
-            conv_agent.entity_id,
-            sorted(registered_agent_ids),
-        )
     _LOGGER.info(
         "Catalog router runtime ready for entry %s: local_agent_id=%s llm_agent_id=%s available_llm_agents=%s runtime_count=%s",
         entry.entry_id,
@@ -319,7 +311,8 @@ async def _async_migrate_assist_pipeline_engine_ids(
 
     migrated = 0
     for pipeline in pipelines:
-        if getattr(pipeline, "conversation_engine", None) != old_engine_id:
+        pipeline_engine = getattr(pipeline, "conversation_engine", None)
+        if pipeline_engine != old_engine_id:
             continue
         try:
             await assist_pipeline.async_update_pipeline(
@@ -335,14 +328,59 @@ async def _async_migrate_assist_pipeline_engine_ids(
                 old_engine_id,
                 new_engine_id,
             )
+    migrated += await _async_migrate_stale_raw_pipeline_engine_ids(
+        hass,
+        pipelines=pipelines,
+        new_engine_id=new_engine_id,
+    )
     if migrated:
         _LOGGER.warning(
-            "Migrated %s Assist pipeline(s) from legacy conversation engine %s to %s",
+            "Migrated %s Assist pipeline(s) to conversation engine %s",
             migrated,
-            old_engine_id,
             new_engine_id,
         )
     return True
+
+
+async def _async_migrate_stale_raw_pipeline_engine_ids(
+    hass: HomeAssistant,
+    *,
+    pipelines,
+    new_engine_id: str,
+) -> int:
+    """Migrate stale raw pipeline engine ids that no longer map to any config entry."""
+    try:
+        from homeassistant.components import assist_pipeline
+    except Exception:
+        return 0
+
+    migrated = 0
+    for pipeline in pipelines:
+        pipeline_engine = getattr(pipeline, "conversation_engine", None)
+        if not isinstance(pipeline_engine, str) or "." in pipeline_engine:
+            continue
+        if hass.config_entries.async_get_entry(pipeline_engine) is not None:
+            continue
+        try:
+            await assist_pipeline.async_update_pipeline(
+                hass,
+                pipeline,
+                conversation_engine=new_engine_id,
+            )
+            migrated += 1
+            _LOGGER.warning(
+                "Migrated stale raw Assist pipeline engine %s on pipeline %s to %s",
+                pipeline_engine,
+                getattr(pipeline, "id", "<unknown>"),
+                new_engine_id,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Failed migrating stale raw Assist pipeline engine %s on pipeline %s",
+                pipeline_engine,
+                getattr(pipeline, "id", "<unknown>"),
+            )
+    return migrated
 
 
 async def _async_retry_assist_pipeline_engine_migration(

@@ -73,8 +73,8 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
 
     @property
     def id(self) -> str:
-        """Stable agent id for Assist pipeline state lookups."""
-        return self.entity_id
+        """Stable callable agent id for Assist pipeline and conversation manager."""
+        return self._entry_id
 
     @property
     def unique_id(self) -> str:

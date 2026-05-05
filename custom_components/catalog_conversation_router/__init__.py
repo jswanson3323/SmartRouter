@@ -45,7 +45,11 @@ from .const import (
     DOMAIN,
     PLATFORMS,
 )
-from .conversation import CatalogRouterConversationAgent
+from .conversation import (
+    CatalogRouterConversationAgent,
+    async_register_agent_alias,
+    async_unregister_agent_alias,
+)
 from .ha_conversation_agents import (
     get_registered_conversation_agents,
     get_registered_llm_agents,
@@ -209,6 +213,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = runtime
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await async_register_agent_alias(hass, entry, conv_agent)
     await _async_migrate_assist_pipeline_engine_ids(
         hass,
         old_engine_id=entry.entry_id,
@@ -256,6 +261,10 @@ async def _async_teardown_runtime(
     """Tear down a runtime defensively."""
     if remove_from_store:
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    try:
+        await async_unregister_agent_alias(hass, entry)
+    except Exception:
+        _LOGGER.exception("Failed to unregister conversation agent alias for entry %s", entry.entry_id)
     if runtime.unsub_refresh:
         try:
             runtime.unsub_refresh()

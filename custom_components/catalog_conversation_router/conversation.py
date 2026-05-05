@@ -21,6 +21,8 @@ try:  # pragma: no cover - exercised in HA runtime
         ConversationInput,
         ConversationResult,
         async_get_result_from_chat_log,
+        async_set_agent,
+        async_unset_agent,
     )
     from homeassistant.helpers.intent import IntentResponse
 
@@ -440,3 +442,17 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
     """Set up the router as a real Home Assistant conversation entity."""
     runtime = hass.data["catalog_conversation_router"][entry.entry_id]
     async_add_entities([runtime.conversation_agent])
+
+
+async def async_register_agent_alias(hass, entry, agent: CatalogRouterConversationAgent) -> None:
+    """Register a legacy manager alias for backwards compatibility."""
+    if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
+        raise RuntimeError("Failed to load Home Assistant conversation API") from _IMPORT_ERROR
+    async_set_agent(hass, entry, agent)
+
+
+async def async_unregister_agent_alias(hass, entry) -> None:
+    """Unregister the legacy manager alias."""
+    if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
+        return
+    async_unset_agent(hass, entry)

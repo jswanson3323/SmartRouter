@@ -438,13 +438,47 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             return wrapped
 
 
+class CatalogRouterLegacyAgentAlias(AbstractConversationAgent):
+    """Legacy manager-style alias for backward compatibility with old pipeline ids."""
+
+    def __init__(
+        self,
+        *,
+        legacy_agent_id: str,
+        entity_agent: CatalogRouterConversationAgent,
+        language: str,
+    ) -> None:
+        self._legacy_agent_id = legacy_agent_id
+        self._entity_agent = entity_agent
+        self._language = language
+
+    @property
+    def attribution(self) -> str | None:
+        """Agent attribution string."""
+        return "Catalog Conversation Router"
+
+    @property
+    def supported_languages(self) -> list[str] | str:
+        """Language support."""
+        return [self._language]
+
+    @property
+    def id(self) -> str:
+        """Legacy callable agent id."""
+        return self._legacy_agent_id
+
+    async def async_process(self, user_input: ConversationInput) -> ConversationResult:
+        """Delegate legacy manager calls through the entity agent."""
+        return await self._entity_agent.async_process(user_input)
+
+
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
     """Set up the router as a real Home Assistant conversation entity."""
     runtime = hass.data["catalog_conversation_router"][entry.entry_id]
     async_add_entities([runtime.conversation_agent])
 
 
-async def async_register_agent_alias(hass, entry, agent: CatalogRouterConversationAgent) -> None:
+async def async_register_agent_alias(hass, entry, agent: AbstractConversationAgent) -> None:
     """Register a legacy manager alias for backwards compatibility."""
     if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
         raise RuntimeError("Failed to load Home Assistant conversation API") from _IMPORT_ERROR

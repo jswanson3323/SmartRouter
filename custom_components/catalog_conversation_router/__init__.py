@@ -47,6 +47,7 @@ from .const import (
 )
 from .conversation import (
     CatalogRouterConversationAgent,
+    CatalogRouterLegacyAgentAlias,
     async_register_agent_alias,
     async_unregister_agent_alias,
 )
@@ -71,6 +72,7 @@ class IntegrationRuntime:
     catalog_manager: CatalogManager
     router: AgentRouter
     conversation_agent: CatalogRouterConversationAgent
+    legacy_agent_alias: object | None = None
     unsub_refresh: callable | None = None
 
 
@@ -193,12 +195,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         language=cfg.language,
         entry_id=entry.entry_id,
     )
+    legacy_agent_alias = CatalogRouterLegacyAgentAlias(
+        legacy_agent_id=entry.entry_id,
+        entity_agent=conv_agent,
+        language=cfg.language,
+    )
 
     runtime = IntegrationRuntime(
         config=cfg,
         catalog_manager=catalog_manager,
         router=router,
         conversation_agent=conv_agent,
+        legacy_agent_alias=legacy_agent_alias,
     )
 
     if cfg.catalog_auto_refresh_enabled:
@@ -213,7 +221,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = runtime
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    await async_register_agent_alias(hass, entry, conv_agent)
+    await async_register_agent_alias(hass, entry, legacy_agent_alias)
     await _async_migrate_assist_pipeline_engine_ids(
         hass,
         old_engine_id=entry.entry_id,

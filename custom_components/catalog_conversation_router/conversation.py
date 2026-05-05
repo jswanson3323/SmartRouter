@@ -64,10 +64,22 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
 
     _attr_supports_streaming = True
 
-    def __init__(self, router, language: str) -> None:
+    def __init__(self, router, language: str, entry_id: str) -> None:
         self._router = router
         self._language = language
         self._hass = getattr(router, "_hass", None)
+        self._entry_id = entry_id
+        self.entity_id = f"conversation.catalog_conversation_router_{entry_id.lower()}"
+
+    @property
+    def id(self) -> str:
+        """Stable agent id for Assist pipeline state lookups."""
+        return self.entity_id
+
+    @property
+    def unique_id(self) -> str:
+        """Stable unique id for this virtual conversation entity."""
+        return self._entry_id
 
     @property
     def attribution(self) -> str | None:

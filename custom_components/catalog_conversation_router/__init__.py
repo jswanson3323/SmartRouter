@@ -183,7 +183,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass=hass,
         router_agent_id=entry.entry_id,
     )
-    conv_agent = CatalogRouterConversationAgent(router=router, language=cfg.language)
+    conv_agent = CatalogRouterConversationAgent(
+        router=router,
+        language=cfg.language,
+        entry_id=entry.entry_id,
+    )
 
     runtime = IntegrationRuntime(
         config=cfg,

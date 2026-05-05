@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -15,6 +16,30 @@ class AgentAdapter:
 
     def __init__(self, hass: Any) -> None:
         self._hass = hass
+
+    def _downstream_conversation_id(
+        self,
+        *,
+        agent_id: str,
+        resolved_agent_id: str | None,
+        conversation_id: str | None,
+    ) -> str | None:
+        """Return the conversation id to use for a downstream agent call.
+
+        The router itself owns the Assist conversation id. Reusing that same id
+        when delegating to a non-default downstream LLM agent can cause Home
+        Assistant to replay the router's current/prior user turns into the
+        downstream LLM chat log, which shows up as duplicated user messages in
+        the raw LLM payload. Keep multi-turn behavior, but namespace the
+        downstream agent conversation id so each delegated agent has its own
+        stable history separate from the router's outer conversation.
+        """
+        if conversation_id is None:
+            return None
+        if resolved_agent_id is None:
+            return conversation_id
+        digest = hashlib.sha1(f"{agent_id}:{conversation_id}".encode()).hexdigest()[:16]
+        return f"catalog-router-{digest}"
 
     async def async_process(
         self,
@@ -31,23 +56,30 @@ class AgentAdapter:
         """Process text through a target agent."""
         resolved_agent_id = None if agent_id in {"homeassistant", "__default__", "default"} else agent_id
 
+        downstream_conversation_id = self._downstream_conversation_id(
+            agent_id=agent_id,
+            resolved_agent_id=resolved_agent_id,
+            conversation_id=conversation_id,
+        )
+
         try:
             from homeassistant.components import conversation
 
             _LOGGER.debug(
-                "LocalAgentAdapter.async_process text=%s configured_agent_id=%s resolved_agent_id=%s language=%s conversation_id=%s device_id=%s satellite_id=%s",
+                "LocalAgentAdapter.async_process text=%s configured_agent_id=%s resolved_agent_id=%s language=%s conversation_id=%s downstream_conversation_id=%s device_id=%s satellite_id=%s",
                 text,
                 agent_id,
                 resolved_agent_id,
                 language,
                 conversation_id,
+                downstream_conversation_id,
                 device_id,
                 satellite_id,
             )
             converse_kwargs = {
                 "hass": self._hass,
                 "text": text,
-                "conversation_id": conversation_id,
+                "conversation_id": downstream_conversation_id,
                 "context": context,
                 "language": language,
                 "agent_id": resolved_agent_id,

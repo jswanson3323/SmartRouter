@@ -84,11 +84,20 @@ ACTIVE_CONVERSATION_TTL = timedelta(hours=6)
 MAX_ACTIVE_CONVERSATIONS = 256
 OPEN_DOMAIN_PREFIXES = (
     "how do i",
+    "how do you",
     "how to",
     "why is",
     "why are",
+    "what is",
+    "what are",
+    "who is",
+    "who are",
+    "when is",
+    "where is",
     "tell me about",
+    "give me",
     "explain",
+    "describe",
     "write",
     "summarize",
     "help me",
@@ -940,8 +949,15 @@ class AgentRouter:
             return False
 
         utterance_tokens = set(tokenize(normalized))
-        if SMART_HOME_HINT_TOKENS & utterance_tokens:
+        has_smart_home_hint = bool(SMART_HOME_HINT_TOKENS & utterance_tokens)
+        if has_smart_home_hint:
             return False
+
+        # Obvious open-domain voice requests should not pay for LLM translation
+        # or raw local Assist probing. Let them hit the streaming LLM fallback
+        # immediately. Home/status/action requests are excluded above.
+        if any(normalized.startswith(prefix) for prefix in OPEN_DOMAIN_PREFIXES):
+            return True
 
         for entity in catalog.entity_targets:
             if utterance_tokens & set(entity.tokens):
@@ -952,7 +968,7 @@ class AgentRouter:
             if utterance_tokens & set(target.tokens):
                 return False
 
-        return any(normalized.startswith(prefix) for prefix in OPEN_DOMAIN_PREFIXES) or len(utterance_tokens) >= 4
+        return len(utterance_tokens) >= 4
 
     async def _try_local_state_query(
         self,

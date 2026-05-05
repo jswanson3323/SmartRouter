@@ -359,8 +359,13 @@ async def _async_migrate_stale_raw_pipeline_engine_ids(
         pipeline_engine = getattr(pipeline, "conversation_engine", None)
         if not isinstance(pipeline_engine, str) or "." in pipeline_engine:
             continue
-        if hass.config_entries.async_get_entry(pipeline_engine) is not None:
+        if pipeline_engine == new_engine_id:
             continue
+        # HA pipelines can retain legacy raw ULID-style conversation engine ids
+        # from prior config entries/aliases. Those ids are not callable once the
+        # real conversation agent is exposed as a ConversationEntity, even if a
+        # config entry with that id still exists. Force raw ids to the live
+        # conversation entity id so Assist does not start with a ghost engine.
         try:
             await assist_pipeline.async_update_pipeline(
                 hass,
@@ -390,7 +395,7 @@ async def _async_retry_assist_pipeline_engine_migration(
     new_engine_id: str,
 ) -> None:
     """Retry Assist pipeline migration until the assist pipeline store is ready."""
-    for delay_s in (0, 5, 15, 30, 60):
+    for delay_s in (0, 5, 15, 30, 60, 120, 300):
         if delay_s:
             await asyncio.sleep(delay_s)
         ready = await _async_migrate_assist_pipeline_engine_ids(
@@ -401,6 +406,6 @@ async def _async_retry_assist_pipeline_engine_migration(
         if ready:
             return
     _LOGGER.warning(
-        "Assist pipeline storage was not ready for conversation engine migration after retries; legacy engine id %s may remain configured until the next reload",
+        "Assist pipeline storage was not ready for conversation engine migration after retries; legacy engine id %s may remain configured. Open Settings > Voice assistants > Assist, edit the affected pipeline, and reselect Catalog Conversation Router as the conversation agent.",
         old_engine_id,
     )

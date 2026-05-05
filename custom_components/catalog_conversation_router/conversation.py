@@ -97,9 +97,9 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         self,
         user_input: ConversationInput,
     ) -> ConversationResult:
-        """Use HA's native ConversationEntity processing when available."""
+        """Use HA's chat-log ConversationEntity processing when available."""
         if _STREAMING_CONVERSATION_API_AVAILABLE:
-            return await super().internal_async_process(user_input)
+            return await super().async_process(user_input)
         return await self.async_process(user_input)
 
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:

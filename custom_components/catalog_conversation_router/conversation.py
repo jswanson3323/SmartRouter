@@ -69,6 +69,8 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         self._language = language
         self._hass = getattr(router, "_hass", None)
         self._entry_id = entry_id
+        self._attr_name = "Catalog Conversation Router"
+        self._attr_unique_id = entry_id
         self.entity_id = f"conversation.catalog_conversation_router_{entry_id.lower()}"
 
     @property
@@ -95,7 +97,9 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         self,
         user_input: ConversationInput,
     ) -> ConversationResult:
-        """Bypass ConversationEntity state bookkeeping for this virtual agent."""
+        """Use HA's native ConversationEntity processing when available."""
+        if _STREAMING_CONVERSATION_API_AVAILABLE:
+            return await super().internal_async_process(user_input)
         return await self.async_process(user_input)
 
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
@@ -434,15 +438,7 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             return wrapped
 
 
-async def async_register_agent(hass, entry, agent: CatalogRouterConversationAgent) -> None:
-    """Register the custom conversation agent with HA."""
-    if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
-        raise RuntimeError("Failed to load Home Assistant conversation API") from _IMPORT_ERROR
-    async_set_agent(hass, entry, agent)
-
-
-async def async_unregister_agent(hass, entry) -> None:
-    """Unregister custom conversation agent."""
-    if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover
-        return
-    async_unset_agent(hass, entry)
+async def async_setup_entry(hass, entry, async_add_entities) -> None:
+    """Set up the router as a real Home Assistant conversation entity."""
+    runtime = hass.data["catalog_conversation_router"][entry.entry_id]
+    async_add_entities([runtime.conversation_agent])

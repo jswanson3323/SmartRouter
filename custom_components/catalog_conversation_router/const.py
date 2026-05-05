@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 DOMAIN: Final = "catalog_conversation_router"
-PLATFORMS: Final[list[str]] = []
+PLATFORMS: Final[list[str]] = ["conversation"]
 
 CONF_LOCAL_AGENT_ID: Final = "local_agent_id"
 CONF_LLM_AGENT_ID: Final = "llm_agent_id"

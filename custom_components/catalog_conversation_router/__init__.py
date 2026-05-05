@@ -43,8 +43,9 @@ from .const import (
     DEFAULT_LLM_TRANSLATE_ENABLED,
     DEFAULT_MAX_LLM_CANDIDATES,
     DOMAIN,
+    PLATFORMS,
 )
-from .conversation import CatalogRouterConversationAgent, async_register_agent, async_unregister_agent
+from .conversation import CatalogRouterConversationAgent
 from .ha_conversation_agents import (
     get_registered_conversation_agents,
     get_registered_llm_agents,
@@ -206,9 +207,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             timedelta(minutes=15),
         )
 
-    await async_register_agent(hass, entry, conv_agent)
-
     hass.data[DOMAIN][entry.entry_id] = runtime
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _LOGGER.info(
         "Catalog router runtime ready for entry %s: local_agent_id=%s llm_agent_id=%s available_llm_agents=%s runtime_count=%s",
         entry.entry_id,
@@ -227,12 +227,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload config entry runtime."""
     runtime: IntegrationRuntime = hass.data[DOMAIN].pop(entry.entry_id)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     await _async_teardown_runtime(hass, entry, runtime, remove_from_store=False)
 
     if not hass.data[DOMAIN]:
         await async_unregister_services(hass)
 
-    return True
+    return unload_ok
 
 
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -250,10 +251,6 @@ async def _async_teardown_runtime(
     """Tear down a runtime defensively."""
     if remove_from_store:
         hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    try:
-        await async_unregister_agent(hass, entry)
-    except Exception:
-        _LOGGER.exception("Failed to unregister conversation agent for entry %s", entry.entry_id)
     if runtime.unsub_refresh:
         try:
             runtime.unsub_refresh()

@@ -75,6 +75,23 @@ class AgentAdapter:
                 raw=None,
             )
 
+        outcome = self.outcome_from_response(
+            agent_id=agent_id,
+            response=response,
+            device_id=device_id,
+            satellite_id=satellite_id,
+        )
+        return outcome
+
+    def outcome_from_response(
+        self,
+        *,
+        agent_id: str,
+        response: Any,
+        device_id: str | None = None,
+        satellite_id: str | None = None,
+    ) -> LocalAgentOutcome:
+        """Build a normalized outcome from a raw conversation response."""
         response_text = self._extract_response_text(response)
         response_type = self._extract_response_type(response)
         error_code = self._extract_error_code(response)
@@ -82,12 +99,15 @@ class AgentAdapter:
         downstream_conversation_id = self._extract_conversation_id(response)
         continue_conversation = self._extract_continue_conversation(response)
         success = self._is_success(response)
-        failure = None if success else self._classify_failure(response_text, error_code=error_code, response_type=response_type)
+        failure = None if success else self._classify_failure(
+            response_text,
+            error_code=error_code,
+            response_type=response_type,
+        )
 
         _LOGGER.debug(
-            "LocalAgentAdapter result configured_agent_id=%s resolved_agent_id=%s device_id=%s satellite_id=%s response_type=%s error_code=%s processed_locally=%s success=%s response_text=%s",
+            "LocalAgentAdapter result configured_agent_id=%s device_id=%s satellite_id=%s response_type=%s error_code=%s processed_locally=%s success=%s response_text=%s",
             agent_id,
-            resolved_agent_id,
             device_id,
             satellite_id,
             response_type,

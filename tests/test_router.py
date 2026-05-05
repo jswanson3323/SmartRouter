@@ -256,6 +256,8 @@ def test_fuzzy_path_success() -> None:
         )
     )
     assert result.path.value == "fuzzy_local"
+    assert result.trace.fuzzy_match_duration_ms is not None
+    assert result.trace.route_duration_ms is not None
 
 
 def test_debug_collection_skips_llm_translation_after_fuzzy_match() -> None:
@@ -358,6 +360,8 @@ def test_final_fallback_path() -> None:
     assert llm_adapter.fallback_calls[-1]["device_id"] == "device-123"
     assert llm_adapter.fallback_calls[-1]["satellite_id"] == "assist_satellite.kitchen"
     assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] == "You are assisting from the kitchen satellite."
+    assert result.trace.llm_fallback_duration_ms is not None
+    assert result.trace.route_duration_ms is not None
 
 
 def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
@@ -970,3 +974,36 @@ def test_open_domain_request_skips_translation_and_exact_local() -> None:
     assert agent_adapter.calls == []
     assert result.trace.llm_translation_summary is not None
     assert result.trace.llm_translation_summary["notes"] == "direct_llm_only"
+
+
+def test_open_domain_request_returns_streaming_fallback_request() -> None:
+    llm_adapter = _FakeLLMAdapter(_Translation(False, None), _outcome(True, text="boil eggs like this"))
+    agent_adapter = _FakeAgentAdapter([])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="how do i boil eggs?",
+            language="en",
+            conversation_id="outer-conv-1",
+            context=None,
+            allow_streaming_llm_fallback=True,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert result.streaming_request is not None
+    assert result.streaming_request.utterance == "how do i boil eggs?"
+    assert result.streaming_request.conversation_id == "outer-conv-1"
+    assert llm_adapter.translate_calls == []
+    assert llm_adapter.fallback_calls == []
+    assert agent_adapter.calls == []
+    assert result.trace.llm_fallback_stream_attempted is True
+    assert result.trace.route_duration_ms is not None

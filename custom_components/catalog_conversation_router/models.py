@@ -234,6 +234,15 @@ class ResolutionTrace:
     llm_fallback_executed: bool | None = None
     llm_fallback_conversation_id: str | None = None
     llm_fallback_continue_conversation: bool | None = None
+    llm_fallback_stream_attempted: bool | None = None
+    llm_fallback_stream_supported: bool | None = None
+    llm_fallback_stream_used: bool | None = None
+    llm_fallback_stream_chunk_count: int | None = None
+    llm_fallback_stream_fallback_reason: str | None = None
+    fuzzy_match_duration_ms: float | None = None
+    llm_translation_duration_ms: float | None = None
+    llm_fallback_duration_ms: float | None = None
+    route_duration_ms: float | None = None
     chosen_canonical_phrase: str | None = None
     assist_pipeline_input: str | None = None
     matched_sample_phrase_raw: str | None = None
@@ -257,6 +266,21 @@ class RouterResult:
     path: ResolutionPath
     outcome: LocalAgentOutcome
     trace: ResolutionTrace
+    streaming_request: StreamingFallbackRequest | None = None
+
+
+@dataclass(slots=True)
+class StreamingFallbackRequest:
+    """Details needed to execute a streaming LLM fallback turn."""
+
+    llm_agent_id: str
+    utterance: str
+    language: str
+    conversation_id: str | None
+    context: Any
+    device_id: str | None = None
+    satellite_id: str | None = None
+    extra_system_prompt: str | None = None
 
 
 @dataclass(slots=True)

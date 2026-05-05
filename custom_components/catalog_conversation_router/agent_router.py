@@ -7,6 +7,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
+from time import perf_counter
 from typing import Any
 
 from .catalog import CatalogManager
@@ -16,11 +17,13 @@ from .matcher import FuzzyMatcher
 from .models import (
     ActiveConversationState,
     EntityTarget,
+    LocalAgentOutcome,
     ParsedStateQuery,
     ResolutionPath,
     ResolutionTrace,
     RouterConfig,
     RouterResult,
+    StreamingFallbackRequest,
 )
 from .phrase_renderer import render_conversation_pattern
 from .phonetics import normalize_text, tokenize
@@ -154,12 +157,14 @@ class AgentRouter:
         dry_run: bool = False,
         debug_collect_all: bool = False,
         execute_debug_branches: bool = False,
+        allow_streaming_llm_fallback: bool = False,
         origin_area: str | None = None,
         device_id: str | None = None,
         satellite_id: str | None = None,
         extra_system_prompt: str | None = None,
     ) -> RouterResult:
         """Run deterministic routing pipeline with bounded attempts."""
+        route_started = perf_counter()
         self._prune_active_conversations()
         _LOGGER.debug("ROUTER START: text=%r, device_id=%r, satellite_id=%r", text, device_id, satellite_id)
         catalog = self._catalog.get_catalog()
@@ -182,6 +187,20 @@ class AgentRouter:
 
         def _should_execute_branch() -> bool:
             return (not dry_run) or execute_debug_branches
+
+        def _result(
+            *,
+            path: ResolutionPath,
+            outcome,
+            streaming_request: StreamingFallbackRequest | None = None,
+        ) -> RouterResult:
+            trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+            return RouterResult(
+                path=path,
+                outcome=outcome,
+                trace=trace,
+                streaming_request=streaming_request,
+            )
 
         def _record_outcome(prefix: str, outcome) -> None:
             executed = outcome is not None
@@ -222,6 +241,7 @@ class AgentRouter:
                 trace.state_query_intercepted_during_llm = True
                 trace.selected_path = ResolutionPath.LOCAL_STATE_QUERY
                 trace.final_executor = "local"
+                trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
                 return state_result
             action_result = await self._try_local_action_during_llm(
                 text=text,
@@ -239,6 +259,7 @@ class AgentRouter:
                 trace.local_action_intercepted_during_llm = True
                 trace.selected_path = action_result.path
                 trace.final_executor = "local"
+                trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
                 return action_result
             trace.assist_pipeline_input = text
             trace.rendered_from_pattern = False
@@ -264,6 +285,26 @@ class AgentRouter:
                     runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
                         active_state.agent_id
                     )
+                    if allow_streaming_llm_fallback:
+                        trace.llm_fallback_stream_attempted = True
+                        trace.llm_fallback_stream_supported = None
+                        trace.llm_fallback_stream_used = None
+                        trace.llm_fallback_stream_fallback_reason = None
+                        return _result(
+                            path=ResolutionPath.LLM_FALLBACK,
+                            outcome=self._empty_outcome(),
+                            streaming_request=StreamingFallbackRequest(
+                                llm_agent_id=runtime_llm_agent_id,
+                                utterance=text,
+                                language=language,
+                                conversation_id=active_state.downstream_conversation_id,
+                                context=context,
+                                device_id=device_id,
+                                satellite_id=satellite_id,
+                                extra_system_prompt=llm_system_prompt,
+                            ),
+                        )
+                    llm_fallback_started = perf_counter()
                     llm_outcome = await self._llm_adapter.async_final_fallback(
                         llm_agent_id=runtime_llm_agent_id,
                         utterance=text,
@@ -273,6 +314,10 @@ class AgentRouter:
                         device_id=device_id,
                         satellite_id=satellite_id,
                         extra_system_prompt=llm_system_prompt,
+                    )
+                    trace.llm_fallback_duration_ms = round(
+                        (perf_counter() - llm_fallback_started) * 1000,
+                        3,
                     )
                 else:
                     llm_outcome = None
@@ -285,10 +330,9 @@ class AgentRouter:
                 )
                 trace.selected_path = ResolutionPath.LLM_FALLBACK
                 trace.final_executor = "llm"
-                return RouterResult(
+                return _result(
                     path=ResolutionPath.LLM_FALLBACK,
                     outcome=llm_outcome,
-                    trace=trace,
                 )
         if active_state is not None and active_state.executor_type == "local":
             trace.assist_pipeline_input = text
@@ -324,10 +368,10 @@ class AgentRouter:
             )
             trace.selected_path = ResolutionPath.EXACT_LOCAL
             trace.final_executor = "local"
-            return RouterResult(
+            trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+            return _result(
                 path=ResolutionPath.EXACT_LOCAL,
                 outcome=local_outcome,
-                trace=trace,
             )
 
         state_result = await self._try_local_state_query(
@@ -347,14 +391,17 @@ class AgentRouter:
         if state_result is not None:
             trace.selected_path = ResolutionPath.LOCAL_STATE_QUERY
             trace.final_executor = "local"
+            trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
             return state_result
 
+        fuzzy_started = perf_counter()
         match_result = self._matcher.match(
             text,
             catalog,
             origin_area=resolved_origin_area,
             origin_super_area=resolved_origin_super_area,
         )
+        trace.fuzzy_match_duration_ms = round((perf_counter() - fuzzy_started) * 1000, 3)
         _LOGGER.debug(
             "FUZZY MATCH: best=%s score=%s",
             getattr(match_result.best, "canonical_phrase", None),
@@ -453,10 +500,9 @@ class AgentRouter:
                         trace.selected_path = ResolutionPath.FUZZY_LOCAL
                         trace.final_executor = "local"
                     if not debug_collect_all:
-                        return RouterResult(
+                        return _result(
                             path=ResolutionPath.FUZZY_LOCAL,
                             outcome=fuzzy_outcome,
-                            trace=trace,
                         )
             else:
                 candidate_detail = match_result.best.detail or {}
@@ -502,10 +548,9 @@ class AgentRouter:
                             trace.selected_path = ResolutionPath.FUZZY_LOCAL
                             trace.final_executor = "local"
                         if not debug_collect_all:
-                            return RouterResult(
+                            return _result(
                                 path=ResolutionPath.FUZZY_LOCAL,
                                 outcome=fuzzy_outcome,
-                                trace=trace,
                             )
                 _LOGGER.debug("Fuzzy candidate rejected: %s", decision.reason)
 
@@ -538,6 +583,7 @@ class AgentRouter:
             runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
                 self._config.llm_agent_id
             )
+            translation_started = perf_counter()
             translation = await self._llm_adapter.async_translate_for_local(
                 llm_agent_id=runtime_llm_agent_id,
                 utterance=text,
@@ -549,6 +595,10 @@ class AgentRouter:
                 origin_area=resolved_origin_area,
                 origin_super_area=resolved_origin_super_area,
                 preserve_raw_text=debug_collect_all,
+            )
+            trace.llm_translation_duration_ms = round(
+                (perf_counter() - translation_started) * 1000,
+                3,
             )
             _LOGGER.debug(
                 "LLM TRANSLATION: valid=%s canonical=%s mode=%s",
@@ -600,10 +650,9 @@ class AgentRouter:
                         trace.selected_path = ResolutionPath.LLM_TRANSLATED_LOCAL
                         trace.final_executor = "local"
                     if not debug_collect_all:
-                        return RouterResult(
+                        return _result(
                             path=ResolutionPath.LLM_TRANSLATED_LOCAL,
                             outcome=translated_outcome,
-                            trace=trace,
                         )
 
         # 3) raw local attempt
@@ -660,7 +709,7 @@ class AgentRouter:
                     selected_path = ResolutionPath.EXACT_LOCAL
                     selected_outcome = exact
                 if not debug_collect_all:
-                    return RouterResult(path=ResolutionPath.EXACT_LOCAL, outcome=exact, trace=trace)
+                    return _result(path=ResolutionPath.EXACT_LOCAL, outcome=exact)
 
             if exact is not None and exact.success and exact.processed_locally is not True:
                 _LOGGER.debug(
@@ -685,6 +734,26 @@ class AgentRouter:
                     origin_super_area=resolved_origin_super_area,
                     extra_system_prompt=extra_system_prompt,
                 )
+                if allow_streaming_llm_fallback:
+                    trace.llm_fallback_stream_attempted = True
+                    trace.llm_fallback_stream_supported = None
+                    trace.llm_fallback_stream_used = None
+                    trace.llm_fallback_stream_fallback_reason = None
+                    return _result(
+                        path=ResolutionPath.LLM_FALLBACK,
+                        outcome=self._empty_outcome(),
+                        streaming_request=StreamingFallbackRequest(
+                            llm_agent_id=runtime_llm_agent_id,
+                            utterance=text,
+                            language=language,
+                            conversation_id=conversation_id,
+                            context=context,
+                            device_id=device_id,
+                            satellite_id=satellite_id,
+                            extra_system_prompt=llm_system_prompt,
+                        ),
+                    )
+                llm_fallback_started = perf_counter()
                 llm_outcome = await self._llm_adapter.async_final_fallback(
                     llm_agent_id=runtime_llm_agent_id,
                     utterance=text,
@@ -694,6 +763,10 @@ class AgentRouter:
                     device_id=device_id,
                     satellite_id=satellite_id,
                     extra_system_prompt=llm_system_prompt,
+                )
+                trace.llm_fallback_duration_ms = round(
+                    (perf_counter() - llm_fallback_started) * 1000,
+                    3,
                 )
             else:
                 llm_outcome = None
@@ -714,7 +787,7 @@ class AgentRouter:
                 selected_path = ResolutionPath.LLM_FALLBACK
                 selected_outcome = llm_outcome
             if not debug_collect_all:
-                return RouterResult(path=ResolutionPath.LLM_FALLBACK, outcome=llm_outcome, trace=trace)
+                return _result(path=ResolutionPath.LLM_FALLBACK, outcome=llm_outcome)
 
         if selected_path is None:
             _LOGGER.warning(
@@ -725,9 +798,34 @@ class AgentRouter:
             )
             trace.selected_path = ResolutionPath.FAILED
             trace.final_executor = "none"
-            return RouterResult(path=ResolutionPath.FAILED, outcome=exact, trace=trace)
+            return _result(path=ResolutionPath.FAILED, outcome=exact)
 
-        return RouterResult(path=selected_path, outcome=selected_outcome, trace=trace)
+        return _result(path=selected_path, outcome=selected_outcome)
+
+    def _empty_outcome(self):
+        """Return a placeholder outcome when execution is deferred."""
+        return LocalAgentOutcome(
+            success=False,
+            response=None,
+            response_text=None,
+            failure_category=None,
+            raw=None,
+        )
+
+    def finalize_streaming_fallback(
+        self,
+        *,
+        conversation_id: str | None,
+        outcome: LocalAgentOutcome,
+        agent_id: str,
+    ) -> None:
+        """Update continuation tracking after a streamed fallback completes."""
+        self._update_conversation_tracking(
+            conversation_id,
+            outcome,
+            executor="llm",
+            agent_id=agent_id,
+        )
 
     def _update_conversation_tracking(
         self,
@@ -959,12 +1057,14 @@ class AgentRouter:
         if not trace.local_action_detected:
             return None
 
+        fuzzy_started = perf_counter()
         match_result = self._matcher.match(
             text,
             catalog,
             origin_area=origin_area,
             origin_super_area=origin_super_area,
         )
+        trace.fuzzy_match_duration_ms = round((perf_counter() - fuzzy_started) * 1000, 3)
         if match_result.best is not None:
             second = match_result.top_candidates[1].score if len(match_result.top_candidates) > 1 else 0.0
             decision = validate_fuzzy_execution(

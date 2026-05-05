@@ -685,7 +685,7 @@ class ConversationTargetSource:
 
             use_blueprint = automation.get("use_blueprint")
             if isinstance(use_blueprint, dict):
-                blueprint_targets = self._build_targets_from_blueprint_reference(
+                blueprint_targets = await self._build_targets_from_blueprint_reference(
                     hass=hass,
                     use_blueprint=use_blueprint,
                     display_name=display_name,
@@ -716,7 +716,7 @@ class ConversationTargetSource:
         )
         return targets
 
-    def _build_targets_from_blueprint_reference(
+    async def _build_targets_from_blueprint_reference(
         self,
         *,
         hass: Any,
@@ -734,7 +734,7 @@ class ConversationTargetSource:
             return []
 
         resolved_path = Path(hass.config.path("blueprints", "automation", blueprint_path))
-        blueprint_data = _read_yaml_file(resolved_path)
+        blueprint_data = await _async_read_yaml_file(hass, resolved_path)
 
         _LOGGER.debug(
             "Blueprint automation discovery: automation=%s path=%s exists=%s loaded=%s",

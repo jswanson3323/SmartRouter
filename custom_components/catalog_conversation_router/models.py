@@ -239,6 +239,9 @@ class ResolutionTrace:
     llm_fallback_stream_used: bool | None = None
     llm_fallback_stream_chunk_count: int | None = None
     llm_fallback_stream_fallback_reason: str | None = None
+    llm_fallback_upstream_prompt_suppressed: bool | None = None
+    llm_fallback_upstream_prompt_chars: int | None = None
+    llm_fallback_prompt_chars: int | None = None
     fuzzy_match_duration_ms: float | None = None
     llm_translation_duration_ms: float | None = None
     llm_fallback_duration_ms: float | None = None

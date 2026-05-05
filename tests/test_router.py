@@ -336,6 +336,7 @@ def test_area_scoped_ambiguity_still_executes_locally() -> None:
 def test_final_fallback_path() -> None:
     match = _MatchResult(best=None, top=[])
     llm_adapter = _FakeLLMAdapter(_Translation(False, None), _outcome(True, "llm answer"))
+    context = object()
     router = AgentRouter(
         config=_config(),
         catalog_manager=_FakeCatalogManager(),
@@ -349,19 +350,56 @@ def test_final_fallback_path() -> None:
             text="complex question",
             language="en",
             conversation_id="conv-1",
-            context=None,
+            context=context,
             device_id="device-123",
             satellite_id="assist_satellite.kitchen",
             extra_system_prompt="You are assisting from the kitchen satellite.",
         )
     )
     assert result.path.value == "llm_fallback"
+    assert llm_adapter.fallback_calls[-1]["llm_agent_id"] == "llm"
+    assert llm_adapter.fallback_calls[-1]["language"] == "en"
     assert llm_adapter.fallback_calls[-1]["conversation_id"] == "conv-1"
+    assert llm_adapter.fallback_calls[-1]["context"] is context
     assert llm_adapter.fallback_calls[-1]["device_id"] == "device-123"
     assert llm_adapter.fallback_calls[-1]["satellite_id"] == "assist_satellite.kitchen"
-    assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] == "You are assisting from the kitchen satellite."
+    assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] is None
+    assert result.trace.llm_fallback_upstream_prompt_suppressed is True
+    assert result.trace.llm_fallback_upstream_prompt_chars == len("You are assisting from the kitchen satellite.")
+    assert result.trace.llm_fallback_prompt_chars == 0
     assert result.trace.llm_fallback_duration_ms is not None
     assert result.trace.route_duration_ms is not None
+
+
+def test_final_fallback_suppresses_large_upstream_prompt() -> None:
+    match = _MatchResult(best=None, top=[])
+    llm_adapter = _FakeLLMAdapter(_Translation(False, None), _outcome(True, "llm answer"))
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+    upstream_prompt = "large upstream prompt " * 1000
+
+    result = asyncio.run(
+        router.async_route(
+            text="complex question",
+            language="en",
+            conversation_id="conv-large",
+            context=None,
+            extra_system_prompt=upstream_prompt,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] is None
+    assert result.trace.llm_fallback_upstream_prompt_suppressed is True
+    assert result.trace.llm_fallback_upstream_prompt_chars == len(upstream_prompt.strip())
+    assert result.trace.llm_fallback_prompt_chars == 0
+    assert result.trace.llm_state_enrichment_prompt is None
 
 
 def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
@@ -412,7 +450,10 @@ def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
     assert llm_adapter.fallback_calls[-1]["conversation_id"] == "downstream-conv-1"
     assert llm_adapter.fallback_calls[-1]["device_id"] == "device-123"
     assert llm_adapter.fallback_calls[-1]["satellite_id"] == "assist_satellite.kitchen"
-    assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] == "You are assisting from the kitchen satellite."
+    assert llm_adapter.fallback_calls[-1]["extra_system_prompt"] is None
+    assert second.trace.llm_fallback_upstream_prompt_suppressed is True
+    assert second.trace.llm_fallback_upstream_prompt_chars == len("You are assisting from the kitchen satellite.")
+    assert second.trace.llm_fallback_prompt_chars == 0
     assert second.trace.llm_translation_summary is not None
     assert second.trace.llm_translation_summary["notes"] == "active_llm_conversation"
     assert second.trace.downstream_conversation_id == "downstream-conv-1"
@@ -461,6 +502,7 @@ def test_active_llm_conversation_adds_targeted_state_enrichment() -> None:
             language="en",
             conversation_id="outer-enrich-1",
             context=None,
+            extra_system_prompt="large upstream prompt",
         )
     )
 
@@ -469,8 +511,12 @@ def test_active_llm_conversation_adds_targeted_state_enrichment() -> None:
     assert "Router-resolved live state for this turn" in prompt
     assert "Office Light: on" in prompt
     assert "Teen Room Light: off" in prompt
+    assert "upstream prompt" not in prompt
     assert second.trace.llm_state_enrichment_applied is True
     assert second.trace.llm_state_enrichment_targets == ["Office Light", "Teen Room Light"]
+    assert second.trace.llm_fallback_upstream_prompt_suppressed is True
+    assert second.trace.llm_fallback_upstream_prompt_chars == len("large upstream prompt")
+    assert second.trace.llm_fallback_prompt_chars == len(prompt)
 
 
 def test_active_llm_state_enrichment_prefers_origin_area() -> None:
@@ -995,6 +1041,7 @@ def test_open_domain_request_returns_streaming_fallback_request() -> None:
             conversation_id="outer-conv-1",
             context=None,
             allow_streaming_llm_fallback=True,
+            extra_system_prompt="streaming upstream prompt",
         )
     )
 
@@ -1002,8 +1049,12 @@ def test_open_domain_request_returns_streaming_fallback_request() -> None:
     assert result.streaming_request is not None
     assert result.streaming_request.utterance == "how do i boil eggs?"
     assert result.streaming_request.conversation_id == "outer-conv-1"
+    assert result.streaming_request.extra_system_prompt is None
     assert llm_adapter.translate_calls == []
     assert llm_adapter.fallback_calls == []
     assert agent_adapter.calls == []
     assert result.trace.llm_fallback_stream_attempted is True
+    assert result.trace.llm_fallback_upstream_prompt_suppressed is True
+    assert result.trace.llm_fallback_upstream_prompt_chars == len("streaming upstream prompt")
+    assert result.trace.llm_fallback_prompt_chars == 0
     assert result.trace.route_duration_ms is not None

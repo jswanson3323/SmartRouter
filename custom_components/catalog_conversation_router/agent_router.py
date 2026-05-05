@@ -283,7 +283,7 @@ class AgentRouter:
                 "notes": "active_llm_conversation",
             }
             trace.llm_translated_local_executed = False
-            llm_system_prompt = self._apply_state_enrichment(
+            llm_system_prompt = self._build_llm_fallback_system_prompt(
                 trace=trace,
                 text=text,
                 catalog=catalog,
@@ -737,7 +737,7 @@ class AgentRouter:
                 runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
                     self._config.llm_agent_id
                 )
-                llm_system_prompt = self._apply_state_enrichment(
+                llm_system_prompt = self._build_llm_fallback_system_prompt(
                     trace=trace,
                     text=text,
                     catalog=catalog,
@@ -1164,7 +1164,7 @@ class AgentRouter:
             trace=trace,
         )
 
-    def _apply_state_enrichment(
+    def _build_llm_fallback_system_prompt(
         self,
         *,
         trace: ResolutionTrace,
@@ -1174,22 +1174,32 @@ class AgentRouter:
         origin_super_area: str | None,
         extra_system_prompt: str | None,
     ) -> str | None:
+        """Build the compact system prompt sent to the fallback LLM."""
+        upstream_prompt = extra_system_prompt.strip() if extra_system_prompt else None
         state_enrichment = self._build_llm_state_enrichment(
             text=text,
             catalog=catalog,
             origin_area=origin_area,
             origin_super_area=origin_super_area,
         )
+
         if state_enrichment:
+            fallback_prompt = state_enrichment["prompt"]
             trace.llm_state_enrichment_applied = True
             trace.llm_state_enrichment_targets = state_enrichment["targets"]
-            trace.llm_state_enrichment_prompt = state_enrichment["prompt"]
-            return self._merge_system_prompts(extra_system_prompt, state_enrichment["prompt"])
+            trace.llm_state_enrichment_prompt = fallback_prompt
+        else:
+            fallback_prompt = None
+            trace.llm_state_enrichment_applied = False
+            trace.llm_state_enrichment_targets = []
+            trace.llm_state_enrichment_prompt = None
 
-        trace.llm_state_enrichment_applied = False
-        trace.llm_state_enrichment_targets = []
-        trace.llm_state_enrichment_prompt = None
-        return extra_system_prompt
+        trace.llm_fallback_upstream_prompt_suppressed = bool(upstream_prompt)
+        trace.llm_fallback_upstream_prompt_chars = (
+            len(upstream_prompt) if upstream_prompt is not None else 0
+        )
+        trace.llm_fallback_prompt_chars = len(fallback_prompt) if fallback_prompt else 0
+        return fallback_prompt
 
     def _build_llm_state_enrichment(
         self,
@@ -1712,17 +1722,6 @@ class AgentRouter:
 
     def _normalize_temperature_text(self, text: str) -> str:
         return TEMPERATURE_WORD_RE.sub("temperature", text)
-
-    def _merge_system_prompts(
-        self,
-        base_prompt: str | None,
-        addition: str | None,
-    ) -> str | None:
-        if not addition:
-            return base_prompt
-        if not base_prompt:
-            return addition
-        return f"{base_prompt.strip()}\n\n{addition.strip()}"
 
     def _resolve_origin_area(
         self,

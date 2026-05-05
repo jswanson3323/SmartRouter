@@ -138,6 +138,7 @@ class AgentRouter:
         agent_adapter,
         llm_adapter: LLMAdapter,
         hass: Any,
+        router_agent_id: str | None = None,
     ) -> None:
         self._config = config
         self._catalog = catalog_manager
@@ -145,6 +146,7 @@ class AgentRouter:
         self._agent_adapter = agent_adapter
         self._llm_adapter = llm_adapter
         self._hass = hass
+        self._router_agent_id = router_agent_id
         self._active_conversations: dict[str, ActiveConversationState] = {}
 
     async def async_route(
@@ -862,8 +864,26 @@ class AgentRouter:
 
     def _resolve_runtime_llm_agent_id(self, configured_agent_id: str) -> str:
         """Resolve the best callable LLM agent id at request time."""
-        descriptors = get_registered_llm_agents(self._hass)
+        descriptors = [
+            descriptor
+            for descriptor in get_registered_llm_agents(self._hass)
+            if descriptor.agent_id != self._router_agent_id
+        ]
         available_ids = {descriptor.agent_id for descriptor in descriptors}
+        if configured_agent_id == self._router_agent_id:
+            _LOGGER.error(
+                "Configured llm_agent_id %s resolves to the router itself; refusing recursive fallback",
+                configured_agent_id,
+            )
+            if len(descriptors) == 1:
+                fallback = descriptors[0].agent_id
+                _LOGGER.warning(
+                    "Using the only non-router LLM agent %s instead of recursive router agent %s",
+                    fallback,
+                    configured_agent_id,
+                )
+                return fallback
+            return configured_agent_id
         if configured_agent_id in available_ids:
             return configured_agent_id
         if len(descriptors) == 1:

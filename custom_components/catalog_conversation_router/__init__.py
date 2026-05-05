@@ -121,6 +121,14 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up config entry runtime."""
+    existing_runtime: IntegrationRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if existing_runtime is not None:
+        _LOGGER.warning(
+            "Config entry %s is being set up while an existing runtime is still present; cleaning up stale runtime first",
+            entry.entry_id,
+        )
+        await _async_teardown_runtime(hass, entry, existing_runtime, remove_from_store=False)
+
     cfg = _entry_to_config(entry)
     available_agents = _available_agent_ids(hass)
     available_llm_agents = _available_llm_agent_ids(hass)
@@ -145,6 +153,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 cfg.llm_agent_id,
                 sorted(available_llm_agents),
             )
+    if cfg.llm_agent_id == entry.entry_id:
+        _LOGGER.error(
+            "Configured llm_agent_id for entry %s points back to the router itself; disabling direct self-recursive selection at setup",
+            entry.entry_id,
+        )
+        non_router_llm_agents = {
+            agent_id for agent_id in available_llm_agents if agent_id != entry.entry_id
+        }
+        if len(non_router_llm_agents) == 1:
+            cfg.llm_agent_id = next(iter(non_router_llm_agents))
+            _LOGGER.warning(
+                "Using non-router LLM agent %s instead of recursive self-selection",
+                cfg.llm_agent_id,
+            )
 
     catalog_manager = CatalogManager(hass, cfg)
     await catalog_manager.async_rebuild()
@@ -159,6 +181,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         agent_adapter=agent_adapter,
         llm_adapter=llm_adapter,
         hass=hass,
+        router_agent_id=entry.entry_id,
     )
     conv_agent = CatalogRouterConversationAgent(router=router, language=cfg.language)
 
@@ -182,6 +205,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await async_register_agent(hass, entry, conv_agent)
 
     hass.data[DOMAIN][entry.entry_id] = runtime
+    _LOGGER.info(
+        "Catalog router runtime ready for entry %s: local_agent_id=%s llm_agent_id=%s available_llm_agents=%s runtime_count=%s",
+        entry.entry_id,
+        cfg.local_agent_id,
+        cfg.llm_agent_id,
+        sorted(available_llm_agents),
+        len(hass.data[DOMAIN]),
+    )
     if len(hass.data[DOMAIN]) == 1:
         await async_register_services(hass)
 
@@ -192,10 +223,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload config entry runtime."""
     runtime: IntegrationRuntime = hass.data[DOMAIN].pop(entry.entry_id)
-
-    await async_unregister_agent(hass, entry)
-    if runtime.unsub_refresh:
-        runtime.unsub_refresh()
+    await _async_teardown_runtime(hass, entry, runtime, remove_from_store=False)
 
     if not hass.data[DOMAIN]:
         await async_unregister_services(hass)
@@ -206,3 +234,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload when options change."""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def _async_teardown_runtime(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    runtime: IntegrationRuntime,
+    *,
+    remove_from_store: bool,
+) -> None:
+    """Tear down a runtime defensively."""
+    if remove_from_store:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    try:
+        await async_unregister_agent(hass, entry)
+    except Exception:
+        _LOGGER.exception("Failed to unregister conversation agent for entry %s", entry.entry_id)
+    if runtime.unsub_refresh:
+        try:
+            runtime.unsub_refresh()
+        except Exception:
+            _LOGGER.exception("Failed to unsubscribe refresh listener for entry %s", entry.entry_id)

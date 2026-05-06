@@ -350,15 +350,16 @@ class LLMAdapter:
         if tool_group is not None and tool_group not in VALID_TOOL_GROUPS:
             tool_group = None
 
-        return LLMTranslationResult(
+        result = LLMTranslationResult(
             mode=mode,
             canonical_text=canonical_text.strip() if isinstance(canonical_text, str) else None,
             tool_group=tool_group,
             confidence=confidence,
             notes=str(notes) if notes is not None else None,
-            payload=payload,
             valid=valid,
         )
+        result.payload = payload
+        return result
 
     def _render_device_catalog(self, catalog: Catalog) -> list[str]:
         lines = [

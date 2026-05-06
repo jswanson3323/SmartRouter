@@ -6,8 +6,6 @@ import json
 import logging
 import re
 from typing import Any
-
-from .matcher import CANONICAL_ACTION_TEXT
 from .models import Catalog, LLMTranslationResult
 from .phonetics import normalize_text, tokenize
 
@@ -417,6 +415,31 @@ class LLMAdapter:
 
         return targets
 
+    def _conversation_target_phrases(self, target) -> list[str]:
+        """Return clean, user-sayable phrases for a conversation target."""
+        phrases: list[str] = []
+        canonical_phrase = getattr(target, "canonical_phrase", None)
+        if isinstance(canonical_phrase, str) and self._is_user_sayable_phrase(canonical_phrase):
+            phrases.append(canonical_phrase.strip())
+        for phrase in getattr(target, "sample_phrases", []) or []:
+            if isinstance(phrase, str) and self._is_user_sayable_phrase(phrase):
+                phrases.append(phrase.strip())
+        return phrases
+
+    def _is_user_sayable_phrase(self, phrase: str | None) -> bool:
+        """Filter out internal/template phrases that hurt the translation prompt."""
+        if not phrase:
+            return False
+        text = phrase.strip()
+        lowered = text.casefold()
+        if not text:
+            return False
+        if "command_prompt" in lowered or "trigger_phrases" in lowered:
+            return False
+        if "computednametype" in lowered:
+            return False
+        return True
+
     def _actions_for_entity(self, entity) -> set[str]:
         actions: set[str] = set()
         for capability in getattr(entity, "capabilities", []) or []:
@@ -495,39 +518,6 @@ class LLMAdapter:
             return "query"
         return "unknown"
 
-    def _build_catalog_phrase_map(self, catalog: Catalog) -> dict[str, dict[str, str]]:
-        entries: dict[str, dict[str, str]] = {}
-        for target in catalog.conversation_targets:
-            if not target.canonical_phrase:
-                continue
-            phrase = target.canonical_phrase.strip()
-            normalized = self._normalize_catalog_phrase(phrase)
-            if not normalized or normalized in entries:
-                continue
-            entries[normalized] = {
-                "phrase": phrase,
-                "tool_group": self._infer_tool_group_from_phrase(phrase),
-            }
-
-        for entity in catalog.entity_targets:
-            tool_group = self._infer_tool_group_from_domain(entity.domain)
-            for capability in entity.capabilities:
-                prefix = CANONICAL_ACTION_TEXT.get(capability)
-                if not prefix:
-                    continue
-                if prefix == "what is":
-                    phrase = f"what is {entity.name}"
-                else:
-                    phrase = f"{prefix} {entity.name}"
-                phrase = phrase.strip()
-                normalized = self._normalize_catalog_phrase(phrase)
-                if not normalized or normalized in entries:
-                    continue
-                entries[normalized] = {
-                    "phrase": phrase,
-                    "tool_group": tool_group,
-                }
-        return entries
 
     def _normalize_catalog_phrase(self, phrase: str | None) -> str:
         if not phrase:

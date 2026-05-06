@@ -14,6 +14,18 @@ def test_build_router_config_defaults() -> None:
     payload = build_router_config({"local_agent_id": "local", "llm_agent_id": "llm"})
     assert payload["fuzzy_enabled"] is True
     assert payload["fuzzy_threshold"] == 0.84
+    assert payload["translate_llm_agent_id"] == "llm"
+
+
+def test_build_router_config_preserves_translate_llm_agent() -> None:
+    payload = build_router_config(
+        {
+            "local_agent_id": "local",
+            "llm_agent_id": "llm",
+            "translate_llm_agent_id": "translate-llm",
+        }
+    )
+    assert payload["translate_llm_agent_id"] == "translate-llm"
 
 
 def test_parse_manual_targets() -> None:

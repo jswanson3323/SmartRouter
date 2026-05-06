@@ -104,19 +104,21 @@ class _Candidate:
 
 
 class _Translation:
-    def __init__(self, valid, canonical_text):
-        self.mode = "translate_for_local" if valid else "fallback_answer"
+    def __init__(self, valid, canonical_text, *, mode=None, tool_group="lighting", notes=""):
+        self.mode = mode or ("translate" if valid else "general")
         self.canonical_text = canonical_text
+        self.tool_group = tool_group
         self.confidence = 0.9
-        self.target_type = CandidateType.ENTITY_COMMAND
-        self.notes = ""
+        self.notes = notes
         self.valid = valid
+        self.raw_text = None
 
 
 def _config() -> RouterConfig:
     return RouterConfig(
         local_agent_id="local",
         llm_agent_id="llm",
+        translate_llm_agent_id="translate-llm",
         language="en",
         fuzzy_enabled=True,
         fuzzy_threshold=0.84,
@@ -293,7 +295,7 @@ def test_llm_translated_local_success() -> None:
         config=_config(),
         catalog_manager=_FakeCatalogManager(),
         matcher=_FakeMatcher(match),
-        agent_adapter=_FakeAgentAdapter([_outcome(False), _outcome(True)]),
+        agent_adapter=_FakeAgentAdapter([_outcome(True)]),
         llm_adapter=_FakeLLMAdapter(_Translation(True, "turn on kitchen light"), _outcome(True)),
         hass=None,
     )
@@ -306,6 +308,38 @@ def test_llm_translated_local_success() -> None:
         )
     )
     assert result.path.value == "llm_translated_local"
+    assert router._llm_adapter.translate_calls[-1]["llm_agent_id"] == "translate-llm"
+
+
+def test_non_translate_classification_is_traced_but_does_not_change_routing() -> None:
+    match = _MatchResult(best=None, top=[])
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None, mode="state", tool_group="lighting"),
+        _outcome(True, "llm answer"),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="what is going on with the lights",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert llm_adapter.translate_calls[-1]["llm_agent_id"] == "translate-llm"
+    assert llm_adapter.fallback_calls[-1]["llm_agent_id"] == "llm"
+    assert result.trace.llm_translation_summary["mode"] == "state"
+    assert result.trace.llm_translation_summary["tool_group"] == "lighting"
+    assert result.trace.llm_translated_local_executed is not True
 
 
 def test_area_scoped_ambiguity_still_executes_locally() -> None:

@@ -9,6 +9,7 @@ PLATFORMS: Final[list[str]] = ["conversation"]
 
 CONF_LOCAL_AGENT_ID: Final = "local_agent_id"
 CONF_LLM_AGENT_ID: Final = "llm_agent_id"
+CONF_TRANSLATE_LLM_AGENT_ID: Final = "translate_llm_agent_id"
 CONF_LANGUAGE: Final = "language"
 CONF_FUZZY_ENABLED: Final = "fuzzy_enabled"
 CONF_FUZZY_THRESHOLD: Final = "fuzzy_threshold"

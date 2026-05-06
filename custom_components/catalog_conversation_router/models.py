@@ -159,8 +159,8 @@ class LLMTranslationResult:
 
     mode: str
     canonical_text: str | None
+    tool_group: str | None
     confidence: float
-    target_type: CandidateType
     notes: str | None
     valid: bool
     raw_text: str | None = None
@@ -218,6 +218,9 @@ class ResolutionTrace:
     fuzzy_local_conversation_id: str | None = None
     fuzzy_local_continue_conversation: bool | None = None
     llm_translation_raw_text: str | None = None
+    llm_translation_tool_group: str | None = None
+    llm_translation_catalog_match: bool | None = None
+    llm_translation_tool_group_inferred: bool | None = None
     llm_translated_local_outcome: str | None = None
     llm_translated_local_response_text: str | None = None
     llm_translated_local_response_type: str | None = None
@@ -315,6 +318,7 @@ class RouterConfig:
 
     local_agent_id: str
     llm_agent_id: str
+    translate_llm_agent_id: str
     language: str
     fuzzy_enabled: bool
     fuzzy_threshold: float

@@ -159,6 +159,7 @@ def _config() -> RouterConfig:
     return RouterConfig(
         local_agent_id="local",
         llm_agent_id="llm",
+        translate_llm_agent_id="translate-llm",
         language="en",
         fuzzy_enabled=True,
         fuzzy_threshold=0.84,

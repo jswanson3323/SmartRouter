@@ -5,19 +5,79 @@ from __future__ import annotations
 import json
 import logging
 import re
-from difflib import SequenceMatcher
 from typing import Any
 
 from .matcher import CANONICAL_ACTION_TEXT
-from .models import CandidateType, Catalog, LLMTranslationResult
+from .models import Catalog, LLMTranslationResult
 from .phonetics import normalize_text, tokenize
 
 _LOGGER = logging.getLogger(__name__)
 
 JSON_BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
-MAX_ENTITY_PROMPT_CANDIDATES = 8
-MAX_CONVERSATION_PROMPT_CANDIDATES = 6
-MAX_LOCALITY_PROMPT_CANDIDATES = 4
+VALID_TRANSLATION_MODES = {"translate", "state", "control", "general"}
+VALID_TOOL_GROUPS = {
+    "general",
+    "timers",
+    "lighting",
+    "climate",
+    "media",
+    "locks",
+    "covers",
+    "fan",
+    "lists",
+    "mixed",
+}
+TRANSLATION_PROMPT_TEMPLATE = """You are a translation/classification layer for a smart home AI system. Return ONLY one compact minified JSON object. No markdown. No code fences. No <think>. No explanations.
+
+Valid modes:
+- translate
+- state
+- control
+- general
+
+Valid tool_group values:
+- general
+- timers
+- lighting
+- climate
+- media
+- locks
+- covers
+- fan
+- lists
+- mixed
+
+Rules:
+1. Try translation first.
+2. If the request is semantically equivalent to a catalog phrase but uses different wording, mode MUST be translate.
+3. Do not classify as state/control when a catalog phrase can answer the same request.
+4. Use translate only when the user request can be confidently mapped to one of the provided catalog phrases.
+5. When using translate, translated_text MUST exactly match one catalog phrase.
+6. If no confident catalog phrase matches, classify instead.
+7. Use state when the user asks for information about the smart home, devices, rooms, timers, sensors, or current status.
+8. Use control when the user wants to control, change, activate, disable, adjust, or operate the smart home.
+9. Use general for everything unrelated to smart home state or control.
+10. Only translate may include a non-null translated_text.
+11. For state, control, and general, translated_text MUST be null.
+12. tool_group can never be translate.
+
+Return format:
+{{"mode":"translate|state|control|general","tool_group":"general|timers|lighting|climate|media|locks|covers|fan|lists|mixed","translated_text":null,"confidence":0.0}}
+
+Catalog phrases:
+{catalog_lines}
+
+Examples:
+User: did I set a timer
+JSON: {{"mode":"translate","tool_group":"timers","translated_text":"what timers do I have","confidence":0.95}}
+
+User: kill the kitchen lights
+JSON: {{"mode":"translate","tool_group":"lighting","translated_text":"turn off kitchen lights","confidence":0.95}}
+
+User: how do I boil eggs
+JSON: {{"mode":"general","tool_group":"general","translated_text":null,"confidence":0.95}}
+
+User: {utterance}"""
 
 class LLMAdapter:
     """Build prompts and parse structured translation output."""
@@ -59,10 +119,10 @@ class LLMAdapter:
 
         if not outcome.response_text:
             return LLMTranslationResult(
-                mode="fallback_answer",
+                mode="general",
                 canonical_text=None,
+                tool_group="general",
                 confidence=0.0,
-                target_type=CandidateType.UNKNOWN,
                 notes="empty_response",
                 valid=False,
                 raw_text=None,
@@ -125,7 +185,9 @@ class LLMAdapter:
         except Exception:
             return text
 
-        if isinstance(payload, dict) and "mode" in payload and "canonical_text" in payload:
+        if isinstance(payload, dict) and "mode" in payload and (
+            "canonical_text" in payload or "translated_text" in payload
+        ):
             remainder = stripped[match.end():].lstrip(" \n,:-")
             return remainder or text
 
@@ -141,211 +203,48 @@ class LLMAdapter:
         origin_area: str | None,
         origin_super_area: str | None = None,
     ) -> str:
-        entity_candidates = self._select_entity_candidates(
+        del language, max_candidates, origin_area, origin_super_area
+        catalog_lines = self._render_catalog_phrases(catalog)
+        return TRANSLATION_PROMPT_TEMPLATE.format(
+            catalog_lines="\n".join(catalog_lines) if catalog_lines else "[general] unavailable",
             utterance=utterance,
-            catalog=catalog,
-            origin_area=origin_area,
-            origin_super_area=origin_super_area,
-            limit=min(max_candidates, MAX_ENTITY_PROMPT_CANDIDATES),
         )
-        conversation_candidates = self._select_conversation_candidates(
-            utterance=utterance,
-            catalog=catalog,
-            limit=min(max_candidates, MAX_CONVERSATION_PROMPT_CANDIDATES),
-        )
-        area_entity_candidates = self._select_locality_entity_candidates(
-            utterance=utterance,
-            catalog=catalog,
-            area=origin_area,
-            limit=MAX_LOCALITY_PROMPT_CANDIDATES,
-        )
-        origin_super_area = origin_super_area or self._infer_super_area_from_origin_area(
-            origin_area=origin_area,
-            catalog=catalog,
-        )
-        super_area_entity_candidates = self._select_locality_entity_candidates(
-            utterance=utterance,
-            catalog=catalog,
-            area=origin_super_area,
-            area_attr="super_area",
-            limit=MAX_LOCALITY_PROMPT_CANDIDATES,
-            exclude_area=origin_area,
-        )
-
-        schema = {
-            "mode": "translate_for_local | fallback_answer",
-            "canonical_text": "string or null",
-            "confidence": "float 0..1",
-            "target_type": "entity_command | conversation_target | unknown",
-            "notes": "string",
-        }
-
-        return (
-            "You are a translation layer for Home Assistant conversation routing. "
-            "Do NOT execute commands, only translate when confident. "
-            "Correct likely ASR mistakes but only to listed valid targets. "
-            "Never invent entities, areas, custom targets, or canonical commands. canonical_text must use only the exact listed entity target names or exact listed conversation target phrases; otherwise return mode=fallback_answer with canonical_text=null. "
-            "canonical_text must be a full natural-language command or exact listed conversation phrase. "
-            "Never return tool names, function names, API names, service names, domain names, or internal identifiers such as HassTurnOn, turn_on, light, fan, script, scene, automation, or homeassistant. "
-            "If origin area is provided, strongly prefer matching entities in that area first. "
-            "If no entity in the origin area fits, use the origin SuperArea as a second pass. "
-            "For generic room-local requests like 'turn on the light', choose an in-area entity when available; otherwise prefer an entity from the same SuperArea. "
-            f"Language: {language}. "
-            f"Original utterance: {utterance!r}. "
-            f"Origin area: {origin_area!r}. "
-            f"Origin SuperArea: {origin_super_area!r}. "
-            f"Origin-area entity targets: {area_entity_candidates}. "
-            f"Origin-SuperArea entity targets: {super_area_entity_candidates}. "
-            f"Relevant entity targets: {entity_candidates}. "
-            f"Relevant conversation targets: {conversation_candidates}. "
-            "Return ONLY a single JSON object and nothing else. Do not include explanations, prefixes, suffixes, or text before or after the JSON. If unsure, return mode=fallback_answer with canonical_text=null. JSON schema: "
-            f"{json.dumps(schema)}"
-        )
-
-    def _select_entity_candidates(
-        self,
-        *,
-        utterance: str,
-        catalog: Catalog,
-        origin_area: str | None,
-        origin_super_area: str | None,
-        limit: int,
-    ) -> list[str]:
-        normalized = normalize_text(utterance)
-        utterance_tokens = set(tokenize(utterance))
-        scored: list[tuple[float, str]] = []
-        for entity in catalog.entity_targets:
-            entity_token_set = set(entity.tokens)
-            overlap = len(utterance_tokens & entity_token_set)
-            similarity = SequenceMatcher(a=normalized, b=entity.normalized_name).ratio()
-            locality_bonus = 0.0
-            if origin_area and entity.area and origin_area.strip().lower() == entity.area.strip().lower():
-                locality_bonus = 0.15
-            elif (
-                origin_super_area
-                and entity.super_area
-                and origin_super_area.strip().lower() == entity.super_area.strip().lower()
-            ):
-                locality_bonus = 0.08
-            score = overlap * 0.4 + similarity * 0.6 + locality_bonus
-            if overlap == 0 and similarity < 0.24 and locality_bonus == 0.0:
-                continue
-            scored.append((score, entity.name))
-        scored.sort(key=lambda item: (-item[0], item[1].lower()))
-        names = [name for _, name in scored[:limit]]
-        if names:
-            return names
-        return [entity.name for entity in catalog.entity_targets[:limit]]
-
-    def _select_conversation_candidates(
-        self,
-        *,
-        utterance: str,
-        catalog: Catalog,
-        limit: int,
-    ) -> list[str]:
-        normalized = normalize_text(utterance)
-        utterance_tokens = set(tokenize(utterance))
-        scored: list[tuple[float, str]] = []
-        for target in catalog.conversation_targets:
-            token_set = set(target.tokens)
-            overlap = len(utterance_tokens & token_set)
-            similarity = SequenceMatcher(a=normalized, b=target.normalized_name).ratio()
-            score = overlap * 0.45 + similarity * 0.55
-            if overlap == 0 and similarity < 0.24:
-                continue
-            scored.append((score, target.display_name))
-        scored.sort(key=lambda item: (-item[0], item[1].lower()))
-        names = [name for _, name in scored[:limit]]
-        if names:
-            return names
-        return [target.display_name for target in catalog.conversation_targets[:limit]]
-
-    def _select_locality_entity_candidates(
-        self,
-        *,
-        utterance: str,
-        catalog: Catalog,
-        area: str | None,
-        limit: int,
-        area_attr: str = "area",
-        exclude_area: str | None = None,
-    ) -> list[str]:
-        if not area:
-            return []
-        normalized_area = area.strip().lower()
-        normalized_exclude_area = exclude_area.strip().lower() if exclude_area else None
-        normalized = normalize_text(utterance)
-        utterance_tokens = set(tokenize(utterance))
-        scored: list[tuple[float, str]] = []
-        for entity in catalog.entity_targets:
-            entity_area = getattr(entity, area_attr, None)
-            if not entity_area or entity_area.strip().lower() != normalized_area:
-                continue
-            if (
-                area_attr == "super_area"
-                and normalized_exclude_area
-                and entity.area
-                and entity.area.strip().lower() == normalized_exclude_area
-            ):
-                continue
-            overlap = len(utterance_tokens & set(entity.tokens))
-            similarity = SequenceMatcher(a=normalized, b=entity.normalized_name).ratio()
-            score = overlap * 0.45 + similarity * 0.55
-            scored.append((score, entity.name))
-        scored.sort(key=lambda item: (-item[0], item[1].lower()))
-        return [name for _, name in scored[:limit]]
-
-    def _infer_super_area_from_origin_area(
-        self,
-        *,
-        origin_area: str | None,
-        catalog: Catalog,
-    ) -> str | None:
-        if not origin_area:
-            return None
-
-        area_name = origin_area.strip().lower()
-        matches = {
-            e.super_area.strip()
-            for e in catalog.entity_targets
-            if e.area and e.super_area and e.area.strip().lower() == area_name
-        }
-        if len(matches) == 1:
-            return next(iter(matches))
-        return None
 
     def _validate_translation_result(
         self,
         result: LLMTranslationResult,
         catalog: Catalog,
     ) -> LLMTranslationResult:
-        """Reject LLM canonical text that is not a known catalog command."""
-        if not result.valid or not result.canonical_text:
+        """Reject translation text that is not a known normalized catalog command."""
+        if not result.valid:
             return result
 
-        valid_phrases: set[str] = {
-            target.canonical_phrase.strip().lower()
-            for target in catalog.conversation_targets
-            if target.canonical_phrase
-        }
-        for entity in catalog.entity_targets:
-            for capability in entity.capabilities:
-                prefix = CANONICAL_ACTION_TEXT.get(capability)
-                if not prefix:
-                    continue
-                if prefix == "what is":
-                    valid_phrases.add(f"what is {entity.name}".strip().lower())
-                else:
-                    valid_phrases.add(f"{prefix} {entity.name}".strip().lower())
-
-        if result.canonical_text.strip().lower() in valid_phrases:
+        if result.mode != "translate":
+            result.canonical_text = None
             return result
 
-        result.valid = False
-        result.mode = "fallback_answer"
-        result.notes = "invalid_canonical_text"
-        result.canonical_text = None
+        if not result.canonical_text:
+            result.valid = False
+            result.notes = "missing_translated_text"
+            return result
+
+        catalog_map = self._build_catalog_phrase_map(catalog)
+        normalized_text = self._normalize_catalog_phrase(result.canonical_text)
+        matched = catalog_map.get(normalized_text)
+        if matched is None:
+            result.valid = False
+            result.notes = "invalid_canonical_text"
+            result.canonical_text = None
+            return result
+
+        result.canonical_text = matched["phrase"]
+        normalized_group = self._normalize_tool_group(result.tool_group)
+        if normalized_group is None:
+            result.tool_group = matched["tool_group"]
+            result.notes = "tool_group_inferred"
+            return result
+
+        result.tool_group = normalized_group
         return result
 
     def _parse_translation_json(self, text: str) -> LLMTranslationResult:
@@ -360,10 +259,10 @@ class LLMAdapter:
         if not match:
             _LOGGER.debug("LLM translation returned no JSON block. Raw text suppressed.")
             return LLMTranslationResult(
-                mode="fallback_answer",
+                mode="general",
                 canonical_text=None,
+                tool_group="general",
                 confidence=0.0,
-                target_type=CandidateType.UNKNOWN,
                 notes="no_json_found",
                 valid=False,
             )
@@ -374,40 +273,140 @@ class LLMAdapter:
             _LOGGER.debug("LLM translation produced invalid JSON. Raw text suppressed.")
             _LOGGER.debug("Invalid LLM JSON payload: %s", text)
             return LLMTranslationResult(
-                mode="fallback_answer",
+                mode="general",
                 canonical_text=None,
+                tool_group="general",
                 confidence=0.0,
-                target_type=CandidateType.UNKNOWN,
                 notes="invalid_json",
                 valid=False,
             )
 
-        mode = str(payload.get("mode", "fallback_answer"))
+        mode = str(payload.get("mode", "general"))
         mode = mode.strip().lower()
-        canonical_text = payload.get("canonical_text")
-        if isinstance(canonical_text, str):
-            canonical_text = canonical_text.strip()
+        translated_text = payload.get("translated_text")
+        canonical_text = translated_text.strip() if isinstance(translated_text, str) else None
         confidence = float(payload.get("confidence", 0.0) or 0.0)
-        raw_target_type = str(payload.get("target_type", "unknown"))
+        tool_group = payload.get("tool_group")
+        if isinstance(tool_group, str):
+            tool_group = tool_group.strip().lower()
+        else:
+            tool_group = None
         notes = payload.get("notes")
-
-        try:
-            target_type = CandidateType(raw_target_type)
-        except ValueError:
-            target_type = CandidateType.UNKNOWN
-
-        valid = (
-            mode == "translate_for_local"
-            and isinstance(canonical_text, str)
-            and canonical_text.strip() != ""
-            and 0.0 <= confidence <= 1.0
-        )
+        valid_mode = mode in VALID_TRANSLATION_MODES
+        valid_confidence = 0.0 <= confidence <= 1.0
+        valid = valid_mode and valid_confidence
+        if mode == "translate":
+            valid = valid and isinstance(canonical_text, str) and canonical_text.strip() != ""
+        else:
+            valid = valid and canonical_text is None
+        if tool_group is not None and tool_group not in VALID_TOOL_GROUPS:
+            tool_group = None
 
         return LLMTranslationResult(
             mode=mode,
             canonical_text=canonical_text.strip() if isinstance(canonical_text, str) else None,
+            tool_group=tool_group,
             confidence=confidence,
-            target_type=target_type,
             notes=str(notes) if notes is not None else None,
             valid=valid,
         )
+
+    def _render_catalog_phrases(self, catalog: Catalog) -> list[str]:
+        return [
+            f"[{item['tool_group']}] {item['phrase']}"
+            for item in self._build_catalog_phrase_map(catalog).values()
+        ]
+
+    def _build_catalog_phrase_map(self, catalog: Catalog) -> dict[str, dict[str, str]]:
+        entries: dict[str, dict[str, str]] = {}
+        for target in catalog.conversation_targets:
+            if not target.canonical_phrase:
+                continue
+            phrase = target.canonical_phrase.strip()
+            normalized = self._normalize_catalog_phrase(phrase)
+            if not normalized or normalized in entries:
+                continue
+            entries[normalized] = {
+                "phrase": phrase,
+                "tool_group": self._infer_tool_group_from_phrase(phrase),
+            }
+
+        for entity in catalog.entity_targets:
+            tool_group = self._infer_tool_group_from_domain(entity.domain)
+            for capability in entity.capabilities:
+                prefix = CANONICAL_ACTION_TEXT.get(capability)
+                if not prefix:
+                    continue
+                if prefix == "what is":
+                    phrase = f"what is {entity.name}"
+                else:
+                    phrase = f"{prefix} {entity.name}"
+                phrase = phrase.strip()
+                normalized = self._normalize_catalog_phrase(phrase)
+                if not normalized or normalized in entries:
+                    continue
+                entries[normalized] = {
+                    "phrase": phrase,
+                    "tool_group": tool_group,
+                }
+        return entries
+
+    def _normalize_catalog_phrase(self, phrase: str | None) -> str:
+        if not phrase:
+            return ""
+        return re.sub(r"\s+", " ", phrase).strip().casefold()
+
+    def _normalize_tool_group(self, tool_group: str | None) -> str | None:
+        if not tool_group:
+            return None
+        normalized = tool_group.strip().lower()
+        return normalized if normalized in VALID_TOOL_GROUPS else None
+
+    def _infer_tool_group_from_domain(self, domain: str | None) -> str:
+        domain_key = (domain or "").strip().lower()
+        return {
+            "light": "lighting",
+            "switch": "lighting",
+            "fan": "fan",
+            "climate": "climate",
+            "media_player": "media",
+            "lock": "locks",
+            "cover": "covers",
+            "timer": "timers",
+            "todo": "lists",
+        }.get(domain_key, "mixed")
+
+    def _infer_tool_group_from_phrase(self, phrase: str) -> str:
+        normalized = normalize_text(phrase)
+        tokens = set(tokenize(normalized))
+        if tokens & {"timer", "timers", "alarm", "alarms", "reminder", "reminders"}:
+            return "timers"
+        if tokens & {"light", "lights", "lamp", "lamps"}:
+            return "lighting"
+        if tokens & {"climate", "temperature", "thermostat", "heat", "cool", "ac"}:
+            return "climate"
+        if tokens & {
+            "media",
+            "music",
+            "movie",
+            "movies",
+            "song",
+            "songs",
+            "speaker",
+            "speakers",
+            "tv",
+            "receiver",
+            "volume",
+            "pause",
+            "play",
+        }:
+            return "media"
+        if tokens & {"lock", "locks", "unlock", "door"}:
+            return "locks"
+        if tokens & {"cover", "covers", "blind", "blinds", "shade", "shades", "curtain", "curtains", "shutter", "shutters", "garage"}:
+            return "covers"
+        if tokens & {"fan", "fans"}:
+            return "fan"
+        if tokens & {"list", "lists", "todo", "shopping", "grocery", "groceries"}:
+            return "lists"
+        return "mixed"

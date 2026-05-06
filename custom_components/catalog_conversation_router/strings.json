@@ -7,6 +7,7 @@
         "data": {
           "local_agent_id": "Local agent ID",
           "llm_agent_id": "LLM agent ID",
+          "translate_llm_agent_id": "Translation LLM agent ID",
           "language": "Language",
           "fuzzy_enabled": "Enable fuzzy matching",
           "fuzzy_threshold": "Fuzzy threshold",
@@ -21,10 +22,12 @@
       }
     },
     "error": {
-      "agent_required": "Both local and LLM agent IDs are required.",
-      "agents_must_differ": "Local and LLM agents must be different.",
-      "invalid_local_agent": "The selected local agent is no longer available. Choose another local agent.",
-      "invalid_llm_agent": "The selected LLM agent is no longer available. Choose another LLM agent.",
+      "agent_required": "Local, fallback LLM, and translation LLM agent IDs are required.",
+          "agents_must_differ": "Local and LLM agents must be different.",
+          "translate_agent_must_differ": "Local and translation LLM agents must be different.",
+          "invalid_local_agent": "The selected local agent is no longer available. Choose another local agent.",
+          "invalid_llm_agent": "The selected LLM agent is no longer available. Choose another LLM agent.",
+          "invalid_translate_llm_agent": "The selected translation LLM agent is no longer available. Choose another LLM agent.",
       "invalid_config": "Invalid configuration.",
       "no_llm_agents_found": "No LLM conversation agents were found. Install or configure one first."
     }
@@ -37,6 +40,7 @@
         "data": {
           "local_agent_id": "Local agent ID",
           "llm_agent_id": "LLM agent ID",
+          "translate_llm_agent_id": "Translation LLM agent ID",
           "fuzzy_enabled": "Enable fuzzy matching",
           "fuzzy_threshold": "Fuzzy threshold",
           "ambiguity_gap": "Ambiguity gap",
@@ -53,8 +57,10 @@
     "error": {
       "invalid_manual_targets": "Manual targets must be a JSON list of objects.",
       "agents_must_differ": "Local and LLM agents must be different.",
+      "translate_agent_must_differ": "Local and translation LLM agents must be different.",
       "invalid_local_agent": "The selected local agent is no longer available. Choose another local agent.",
       "invalid_llm_agent": "The selected LLM agent is no longer available. Choose another LLM agent.",
+      "invalid_translate_llm_agent": "The selected translation LLM agent is no longer available. Choose another LLM agent.",
       "no_llm_agents_found": "No LLM conversation agents were found. Install or configure one first."
     }
   }

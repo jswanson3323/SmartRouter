@@ -278,7 +278,7 @@ class AgentRouter:
             trace.llm_translation_summary = {
                 "mode": "skipped",
                 "confidence": 0.0,
-                "target_type": "unknown",
+                "tool_group": None,
                 "valid": False,
                 "notes": "active_llm_conversation",
             }
@@ -352,7 +352,7 @@ class AgentRouter:
             trace.llm_translation_summary = {
                 "mode": "skipped",
                 "confidence": 0.0,
-                "target_type": "unknown",
+                "tool_group": None,
                 "valid": False,
                 "notes": "active_local_conversation",
             }
@@ -579,7 +579,7 @@ class AgentRouter:
             trace.llm_translation_summary = {
                 "mode": "skipped",
                 "confidence": 0.0,
-                "target_type": "unknown",
+                "tool_group": None,
                 "valid": False,
                 "notes": (
                     "skipped_due_to_fuzzy_match"
@@ -592,7 +592,7 @@ class AgentRouter:
             trace.llm_translated_local_executed = False
         if should_run_llm_translation:
             runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
-                self._config.llm_agent_id
+                self._config.translate_llm_agent_id
             )
             translation_started = perf_counter()
             translation = await self._llm_adapter.async_translate_for_local(
@@ -617,14 +617,22 @@ class AgentRouter:
                 translation.canonical_text,
                 translation.mode,
             )
+            inferred_tool_group = translation.notes == "tool_group_inferred"
             trace.llm_translation_summary = {
                 "mode": translation.mode,
+                "tool_group": translation.tool_group,
                 "confidence": translation.confidence,
-                "target_type": translation.target_type.value,
                 "valid": translation.valid,
                 "notes": translation.notes,
             }
             trace.llm_translation_raw_text = translation.raw_text
+            trace.llm_translation_tool_group = translation.tool_group
+            trace.llm_translation_catalog_match = (
+                translation.mode == "translate"
+                and translation.canonical_text is not None
+                and translation.valid
+            )
+            trace.llm_translation_tool_group_inferred = inferred_tool_group
 
             if translation.valid and translation.canonical_text:
                 if selected_path is None:

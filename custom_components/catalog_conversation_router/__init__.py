@@ -34,6 +34,7 @@ from .const import (
     CONF_LOCAL_AGENT_ID,
     CONF_MANUAL_TARGETS,
     CONF_MAX_LLM_CANDIDATES,
+    CONF_TRANSLATE_LLM_AGENT_ID,
     DEFAULT_AMBIGUITY_GAP,
     DEFAULT_CATALOG_AUTO_REFRESH_ENABLED,
     DEFAULT_DEBUG_ENABLED,
@@ -93,6 +94,10 @@ def _entry_to_config(entry: ConfigEntry) -> RouterConfig:
     return RouterConfig(
         local_agent_id=merged[CONF_LOCAL_AGENT_ID],
         llm_agent_id=merged[CONF_LLM_AGENT_ID],
+        translate_llm_agent_id=merged.get(
+            CONF_TRANSLATE_LLM_AGENT_ID,
+            merged[CONF_LLM_AGENT_ID],
+        ),
         language=merged.get(CONF_LANGUAGE, "en"),
         fuzzy_enabled=merged.get(CONF_FUZZY_ENABLED, DEFAULT_FUZZY_ENABLED),
         fuzzy_threshold=merged.get(CONF_FUZZY_THRESHOLD, DEFAULT_FUZZY_THRESHOLD),

@@ -221,10 +221,20 @@ class SemanticService:
             return 0.0
         if super_area and self._normalize_text(super_area) and self._normalize_text(super_area) in utterance_norm:
             return 0.0
-        if origin_area and area and self._normalize_text(origin_area) == self._normalize_text(area):
-            return 0.05
-        if origin_super_area and super_area and self._normalize_text(origin_super_area) == self._normalize_text(super_area):
-            return 0.03
+        if origin_area:
+            normalized_origin_area = self._normalize_text(origin_area)
+            normalized_area = self._normalize_text(area) if area else ""
+            if normalized_area:
+                if normalized_origin_area == normalized_area:
+                    return 0.18
+                return -0.06
+        if origin_super_area:
+            normalized_origin_super_area = self._normalize_text(origin_super_area)
+            normalized_super_area = self._normalize_text(super_area) if super_area else ""
+            if normalized_super_area:
+                if normalized_origin_super_area == normalized_super_area:
+                    return 0.1
+                return -0.03
         return 0.0
 
     def _load_options(self) -> dict[str, Any]:

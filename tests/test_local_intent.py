@@ -408,3 +408,114 @@ def test_semantic_entity_match_can_resolve_office_fan_by_meaning() -> None:
     assert result.valid is True
     assert result.source == "semantic_entity_matcher"
     assert result.canonical_text == "turn off office fan"
+
+
+def test_semantic_entity_match_uses_origin_area_to_break_plural_tie() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r7",
+            last_refreshed="now",
+            language="en",
+            entity_count=3,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.office_main",
+                "Office Main Light",
+                domain="light",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "set", "query"],
+            ),
+            _entity_target(
+                "light.great_room_main",
+                "Great Room Light",
+                domain="light",
+                area="Great Room",
+                capabilities=["turn_on", "turn_off", "set", "query"],
+            ),
+            _entity_target(
+                "light.kitchen_main",
+                "Kitchen Light",
+                domain="light",
+                area="Kitchen",
+                capabilities=["turn_on", "turn_off", "set", "query"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    ranker = _FakeSemanticRanker(
+        entity=[
+            SemanticEntityCandidate(
+                action="turn_off",
+                target_name="great room lights",
+                tool_group="lighting",
+                score=0.8534,
+                synthetic=True,
+                singular=False,
+            ),
+            SemanticEntityCandidate(
+                action="turn_off",
+                target_name="kitchen lights",
+                tool_group="lighting",
+                score=0.8467,
+                synthetic=True,
+                singular=False,
+            ),
+            SemanticEntityCandidate(
+                action="turn_off",
+                target_name="office lights",
+                tool_group="lighting",
+                score=0.834,
+                synthetic=True,
+                singular=False,
+            ),
+        ]
+    )
+
+    result = LocalIntentResolver(semantic_ranker=ranker).resolve(
+        utterance="kill the lights",
+        catalog=catalog,
+        origin_area="Office",
+    )
+
+    assert result.valid is True
+    assert result.source == "semantic_entity_matcher"
+    assert result.canonical_text == "turn off office lights"
+
+
+def test_semantic_direct_phrase_match_skips_device_control_phrase_noise() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r8",
+            last_refreshed="now",
+            language="en",
+            entity_count=0,
+            conversation_target_count=1,
+        ),
+        entity_targets=[],
+        conversation_targets=[
+            _conversation_target("manual:spa-lights-off", "turn off the spa lights"),
+        ],
+    )
+    ranker = _FakeSemanticRanker(
+        phrase=[
+            SemanticPhraseCandidate(
+                target_id="manual:spa-lights-off",
+                example_text="turn off the spa lights",
+                raw_text="turn off the spa lights",
+                score=0.91,
+                concrete=True,
+                has_slots=False,
+                tool_group="lighting",
+            )
+        ]
+    )
+
+    result = LocalIntentResolver(semantic_ranker=ranker).resolve(
+        utterance="kill the lights",
+        catalog=catalog,
+    )
+
+    assert result.valid is False
+    assert result.source is None

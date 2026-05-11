@@ -77,6 +77,7 @@ NUMBER_WORDS = {
 }
 ENTITY_SKIP_WORDS = ["please", "can you", "would you"]
 PHRASE_SKIP_WORDS = ["please"]
+DEVICE_CONTROL_TOOL_GROUPS = {"lighting", "fan", "climate", "media", "locks", "covers"}
 
 ENTITY_ACTION_RULES: dict[str, dict[str, Any]] = {
     "turn_on": {
@@ -408,7 +409,12 @@ class LocalIntentResolver:
         if not semantic_candidates:
             return None
         best = semantic_candidates[0]
-        if best.score < PHRASE_DIRECT_THRESHOLD or not best.concrete or best.has_slots:
+        if (
+            best.score < PHRASE_DIRECT_THRESHOLD
+            or not best.concrete
+            or best.has_slots
+            or best.tool_group in DEVICE_CONTROL_TOOL_GROUPS
+        ):
             return None
         return LLMTranslationResult(
             mode="translate",
@@ -516,6 +522,9 @@ class LocalIntentResolver:
             return self._semantic_direct_entity_match(
                 semantic_candidates=semantic_candidates,
                 targets=targets,
+                utterance=utterance,
+                origin_area=origin_area,
+                origin_super_area=origin_super_area,
             )
 
         action = self._result_slot_value(result, "action")
@@ -583,25 +592,47 @@ class LocalIntentResolver:
         *,
         semantic_candidates: list[SemanticEntityCandidate],
         targets: list[BuilderTarget],
+        utterance: str,
+        origin_area: str | None,
+        origin_super_area: str | None,
     ) -> LLMTranslationResult | None:
         if not semantic_candidates:
             return None
-        best = semantic_candidates[0]
-        second = semantic_candidates[1] if len(semantic_candidates) > 1 else None
+        resolved_candidates: list[tuple[SemanticEntityCandidate, BuilderTarget]] = []
+        for candidate in semantic_candidates:
+            matched = next(
+                (
+                    target
+                    for target in targets
+                    if target.normalized_name == candidate.target_name
+                    and target.tool_group == candidate.tool_group
+                ),
+                None,
+            )
+            if matched is None or candidate.action not in matched.actions:
+                continue
+            resolved_candidates.append((candidate, matched))
+
+        if not resolved_candidates:
+            return None
+
+        best, matched = resolved_candidates[0]
+        second = resolved_candidates[1][0] if len(resolved_candidates) > 1 else None
         if best.score < ENTITY_DIRECT_THRESHOLD:
             return None
+
+        utterance_norm = normalize_text(utterance)
         if second is not None and (best.score - second.score) < ENTITY_AMBIGUITY_GAP:
-            return None
-        matched = next(
-            (
-                target
-                for target in targets
-                if target.normalized_name == best.target_name and target.tool_group == best.tool_group
-            ),
-            None,
-        )
-        if matched is None or best.action not in matched.actions:
-            return None
+            preferred = self._prefer_origin_semantic_candidate(
+                resolved_candidates=resolved_candidates,
+                utterance=utterance_norm,
+                origin_area=origin_area,
+                origin_super_area=origin_super_area,
+            )
+            if preferred is None:
+                return None
+            best, matched = preferred
+
         return LLMTranslationResult(
             mode="translate",
             canonical_text=self._canonical_text_from_action_target(best.action, matched.name),
@@ -628,6 +659,51 @@ class LocalIntentResolver:
             },
             raw_text=None,
         )
+
+    def _prefer_origin_semantic_candidate(
+        self,
+        *,
+        resolved_candidates: list[tuple[SemanticEntityCandidate, BuilderTarget]],
+        utterance: str,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> tuple[SemanticEntityCandidate, BuilderTarget] | None:
+        if self._utterance_mentions_known_location(
+            utterance,
+            [target for _, target in resolved_candidates],
+        ):
+            return None
+
+        normalized_origin_area = self._normalize_display_name(origin_area) or None
+        normalized_origin_super_area = self._normalize_display_name(origin_super_area) or None
+
+        if normalized_origin_area:
+            area_matches = [
+                pair for pair in resolved_candidates if pair[1].area == normalized_origin_area
+            ]
+            if area_matches:
+                return area_matches[0]
+
+        if normalized_origin_super_area:
+            super_area_matches = [
+                pair for pair in resolved_candidates if pair[1].super_area == normalized_origin_super_area
+            ]
+            if super_area_matches:
+                return super_area_matches[0]
+
+        return None
+
+    def _utterance_mentions_known_location(
+        self,
+        utterance: str,
+        targets: list[BuilderTarget],
+    ) -> bool:
+        for target in targets:
+            if target.area and target.area in utterance:
+                return True
+            if target.super_area and target.super_area in utterance:
+                return True
+        return False
 
     def _semantic_debug_snapshot(
         self,

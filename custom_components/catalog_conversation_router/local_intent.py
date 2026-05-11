@@ -785,6 +785,8 @@ class LocalIntentResolver:
                             "tool_group": target.tool_group,
                             "synthetic": target.synthetic,
                             "singular": not target.synthetic and not target.normalized_name.endswith("s"),
+                            "area": target.area,
+                            "super_area": target.super_area,
                             "semantic_text": semantic_text,
                         }
                     )

@@ -41,6 +41,8 @@ class CommandDoc(BaseModel):
     tool_group: str
     synthetic: bool
     singular: bool
+    area: str | None = None
+    super_area: str | None = None
     semantic_text: str
 
 
@@ -99,10 +101,6 @@ class SemanticService:
 
     def rank_entity(self, request: EntityRequest) -> dict[str, Any]:
         query_text = self._normalize_text(request.utterance)
-        if request.origin_area and request.origin_area.casefold() not in query_text:
-            query_text = f"{query_text} {self._normalize_text(request.origin_area)}"
-        elif request.origin_super_area and request.origin_super_area.casefold() not in query_text:
-            query_text = f"{query_text} {self._normalize_text(request.origin_super_area)}"
 
         ranked = self._rank(query_text, [doc.semantic_text for doc in request.commands], request.limit)
         candidates = []
@@ -114,6 +112,17 @@ class SemanticService:
                 target_name=doc.target_name,
                 synthetic=doc.synthetic,
                 singular=doc.singular,
+            )
+            adjusted += self._target_overlap_bonus(
+                utterance=self._normalize_text(request.utterance),
+                target_name=doc.target_name,
+            )
+            adjusted += self._origin_area_bonus(
+                utterance=self._normalize_text(request.utterance),
+                area=doc.area,
+                super_area=doc.super_area,
+                origin_area=request.origin_area,
+                origin_super_area=request.origin_super_area,
             )
             item = {
                 "action": doc.action,
@@ -184,6 +193,38 @@ class SemanticService:
             return -0.03
         if singular and any(token in tokens for token in {"fans", "lights", "lamps", "timers", "alarms", "reminders"}):
             return -0.02
+        return 0.0
+
+    def _target_overlap_bonus(self, *, utterance: str, target_name: str) -> float:
+        utterance_tokens = set(utterance.split())
+        target_tokens = [token for token in self._normalize_text(target_name).split() if token not in {"the"}]
+        if not utterance_tokens or not target_tokens:
+            return 0.0
+        overlap = sum(1 for token in target_tokens if token in utterance_tokens)
+        if overlap == 0:
+            return 0.0
+        if " ".join(target_tokens) in utterance:
+            return 0.1
+        return min(0.08, 0.08 * (overlap / len(target_tokens)))
+
+    def _origin_area_bonus(
+        self,
+        *,
+        utterance: str,
+        area: str | None,
+        super_area: str | None,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> float:
+        utterance_norm = self._normalize_text(utterance)
+        if area and self._normalize_text(area) and self._normalize_text(area) in utterance_norm:
+            return 0.0
+        if super_area and self._normalize_text(super_area) and self._normalize_text(super_area) in utterance_norm:
+            return 0.0
+        if origin_area and area and self._normalize_text(origin_area) == self._normalize_text(area):
+            return 0.05
+        if origin_super_area and super_area and self._normalize_text(origin_super_area) == self._normalize_text(super_area):
+            return 0.03
         return 0.0
 
     def _load_options(self) -> dict[str, Any]:

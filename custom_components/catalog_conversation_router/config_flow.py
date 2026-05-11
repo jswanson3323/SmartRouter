@@ -59,9 +59,7 @@ def build_router_config(data: dict[str, Any]) -> dict[str, Any]:
     return {
         CONF_LOCAL_AGENT_ID: str(data[CONF_LOCAL_AGENT_ID]).strip(),
         CONF_LLM_AGENT_ID: str(data[CONF_LLM_AGENT_ID]).strip(),
-        CONF_TRANSLATE_LLM_AGENT_ID: str(
-            data.get(CONF_TRANSLATE_LLM_AGENT_ID, data[CONF_LLM_AGENT_ID])
-        ).strip(),
+        CONF_TRANSLATE_LLM_AGENT_ID: str(data[CONF_LLM_AGENT_ID]).strip(),
         CONF_LANGUAGE: str(data.get(CONF_LANGUAGE, "en")).strip() or "en",
         CONF_FUZZY_ENABLED: bool(data.get(CONF_FUZZY_ENABLED, DEFAULT_FUZZY_ENABLED)),
         CONF_FUZZY_THRESHOLD: min(max(fuzzy_threshold, 0.0), 1.0),
@@ -176,7 +174,6 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
                 if (
                     not config[CONF_LOCAL_AGENT_ID]
                     or not config[CONF_LLM_AGENT_ID]
-                    or not config[CONF_TRANSLATE_LLM_AGENT_ID]
                 ):
                     errors["base"] = "agent_required"
                 elif config[CONF_LLM_AGENT_ID] == NO_AGENT_PLACEHOLDER:
@@ -185,12 +182,8 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
                     errors["base"] = "invalid_local_agent"
                 elif config[CONF_LLM_AGENT_ID] not in llm_values:
                     errors["base"] = "invalid_llm_agent"
-                elif config[CONF_TRANSLATE_LLM_AGENT_ID] not in llm_values:
-                    errors["base"] = "invalid_translate_llm_agent"
                 elif config[CONF_LOCAL_AGENT_ID] == config[CONF_LLM_AGENT_ID]:
                     errors["base"] = "agents_must_differ"
-                elif config[CONF_LOCAL_AGENT_ID] == config[CONF_TRANSLATE_LLM_AGENT_ID]:
-                    errors["base"] = "translate_agent_must_differ"
                 else:
                     return self.async_create_entry(
                         title="Catalog Conversation Router",
@@ -209,10 +202,6 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
                     ): local_selector,
                     vol.Required(
                         CONF_LLM_AGENT_ID,
-                        default=llm_options[0]["value"],
-                    ): llm_selector,
-                    vol.Required(
-                        CONF_TRANSLATE_LLM_AGENT_ID,
                         default=llm_options[0]["value"],
                     ): llm_selector,
                     vol.Optional(CONF_LANGUAGE, default="en"): str,
@@ -298,7 +287,6 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                 if (
                     not normalized[CONF_LOCAL_AGENT_ID]
                     or not normalized[CONF_LLM_AGENT_ID]
-                    or not normalized[CONF_TRANSLATE_LLM_AGENT_ID]
                 ):
                     errors["base"] = "agent_required"
                 elif normalized[CONF_LLM_AGENT_ID] == NO_AGENT_PLACEHOLDER:
@@ -307,12 +295,8 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                     errors["base"] = "invalid_local_agent"
                 elif normalized[CONF_LLM_AGENT_ID] not in llm_values:
                     errors["base"] = "invalid_llm_agent"
-                elif normalized[CONF_TRANSLATE_LLM_AGENT_ID] not in llm_values:
-                    errors["base"] = "invalid_translate_llm_agent"
                 elif normalized[CONF_LOCAL_AGENT_ID] == normalized[CONF_LLM_AGENT_ID]:
                     errors["base"] = "agents_must_differ"
-                elif normalized[CONF_LOCAL_AGENT_ID] == normalized[CONF_TRANSLATE_LLM_AGENT_ID]:
-                    errors["base"] = "translate_agent_must_differ"
                 else:
                     return self.async_create_entry(title="", data=normalized)
             except Exception:
@@ -355,13 +339,6 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
         )
         if llm_default not in llm_values:
             llm_default = llm_options[0]["value"]
-        translate_llm_default = self._entry.options.get(
-            CONF_TRANSLATE_LLM_AGENT_ID,
-            self._entry.data.get(CONF_TRANSLATE_LLM_AGENT_ID, llm_default),
-        )
-        if translate_llm_default not in llm_values:
-            translate_llm_default = llm_default
-
         return vol.Schema(
             {
                 vol.Required(
@@ -371,10 +348,6 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_LLM_AGENT_ID,
                     default=llm_default,
-                ): llm_selector,
-                vol.Required(
-                    CONF_TRANSLATE_LLM_AGENT_ID,
-                    default=translate_llm_default,
                 ): llm_selector,
                 vol.Optional(
                     CONF_LANGUAGE,

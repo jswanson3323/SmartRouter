@@ -5,11 +5,14 @@ import sys
 import types
 
 from custom_components.catalog_conversation_router.agent_router import AgentRouter
+from custom_components.catalog_conversation_router.llm_adapter import LLMAdapter
+from custom_components.catalog_conversation_router.matcher import FuzzyMatcher
 from custom_components.catalog_conversation_router.models import (
     CandidateType,
     Catalog,
     EntityTarget,
     CatalogMetadata,
+    ConversationTarget,
     LocalAgentOutcome,
     RouterConfig,
 )
@@ -289,6 +292,54 @@ def test_debug_collection_skips_llm_translation_after_fuzzy_match() -> None:
     assert result.trace.llm_translated_local_executed is False
 
 
+def test_fuzzy_conversation_target_with_empty_slots_falls_through_to_translation() -> None:
+    detail = {
+        "matched_sample_phrase_raw": "set [a] timer for {when}",
+        "matched_sample_phrase_normalized_for_scoring": "set timer",
+    }
+    candidate = _Candidate(
+        "set [a] timer for {when}",
+        score=0.91,
+        candidate_type=CandidateType.CONVERSATION_TARGET,
+        detail=detail,
+    )
+    match = _MatchResult(best=candidate, top=[candidate])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(False), _outcome(True)]),
+        llm_adapter=_FakeLLMAdapter(_Translation(True, "what timers do i have"), _outcome(True)),
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="did I set a timer?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert result.trace.fuzzy_decision["allowed"] is False
+    assert result.trace.fuzzy_decision["reason"] == "missing_required_slots"
+    assert result.trace.fuzzy_decision["missing_slots"] == ["when"]
+    assert result.trace.rendered_slots == {"when": ""}
+    assert result.trace.llm_translation_summary["mode"] == "translate"
+    assert router._llm_adapter.translate_calls[-1]["llm_agent_id"] == "translate-llm"
+
+
+def test_kill_phrase_parses_as_turn_off() -> None:
+    matcher = FuzzyMatcher(fuzzy_threshold=0.84, ambiguity_gap=0.08)
+
+    parsed = matcher.parse_utterance("kill the office light")
+
+    assert parsed.action == "turn_off"
+    assert parsed.action_phrase == "kill"
+    assert parsed.target_phrase == "office light"
+
+
 def test_llm_translated_local_success() -> None:
     match = _MatchResult(best=None, top=[])
     router = AgentRouter(
@@ -340,6 +391,34 @@ def test_non_translate_classification_is_traced_but_does_not_change_routing() ->
     assert result.trace.llm_translation_summary["mode"] == "state"
     assert result.trace.llm_translation_summary["tool_group"] == "lighting"
     assert result.trace.llm_translated_local_executed is not True
+
+
+def test_translate_mode_disables_final_llm_fallback_when_local_handling_fails() -> None:
+    match = _MatchResult(best=None, top=[])
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(True, "turn on kitchen light", mode="translate", tool_group="lighting"),
+        _outcome(True, "llm answer"),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(False), _outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="kill the kitchen lights",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "failed"
+    assert llm_adapter.fallback_calls == []
+    assert result.trace.llm_translation_summary["mode"] == "translate"
 
 
 def test_area_scoped_ambiguity_still_executes_locally() -> None:
@@ -973,6 +1052,45 @@ def test_conversation_pattern_is_rendered_for_assist_input() -> None:
     assert result.path.value == "fuzzy_local"
     assert result.trace.chosen_canonical_phrase == pattern
     assert result.trace.assist_pipeline_input == "how much time is left on my test timer"
+
+
+def test_local_phrase_translation_branch_runs_without_llm() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.conversation_targets = [
+        ConversationTarget(
+            target_id="manual:timer",
+            type="manual",
+            display_name="timer",
+            normalized_name="timer",
+            sample_phrases=[],
+            canonical_phrase="set [a] timer for {when}",
+            source="manual",
+            slots=["when"],
+            tokens=["set", "timer", "for"],
+            phonetic_tokens=["S300", "T560", "F600"],
+        )
+    ]
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult(best=None, top=[])),
+        agent_adapter=_FakeAgentAdapter([_outcome(True)]),
+        llm_adapter=LLMAdapter(_FakeAgentAdapter([])),
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="set timer for five minutes",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert result.trace.assist_pipeline_input == "set timer for five minutes"
+    assert result.trace.llm_translation_summary["source"] == "phrase_matcher"
 
 
 def test_origin_super_area_resolves_from_area_label_ids(monkeypatch) -> None:

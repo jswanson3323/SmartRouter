@@ -1219,7 +1219,11 @@ class FuzzyMatcher:
         return cleaned
 
     def _build_entity_canonical(self, action: str | None, name: str) -> str:
-        prefix = CANONICAL_ACTION_TEXT.get(action or "", "activate")
+        if action is None:
+            return name
+        prefix = CANONICAL_ACTION_TEXT.get(action, "")
+        if not prefix:
+            return name
         if prefix == "what is":
             return f"what is {name}"
         return f"{prefix} {name}"

@@ -163,6 +163,10 @@ class LLMTranslationResult:
     confidence: float
     notes: str | None
     valid: bool
+    source: str | None = None
+    intent_family: str | None = None
+    confidence_reason: str | None = None
+    debug: dict[str, Any] | None = None
     raw_text: str | None = None
 
 

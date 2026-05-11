@@ -80,7 +80,56 @@ LOCAL_ACTION_PREFIXES = (
     "activate",
     "deactivate",
 )
+CONTROL_LIKE_VERB_TOKENS = {
+    "activate",
+    "adjust",
+    "arm",
+    "blast",
+    "cancel",
+    "change",
+    "clear",
+    "close",
+    "deactivate",
+    "delete",
+    "disable",
+    "disarm",
+    "enable",
+    "kill",
+    "lock",
+    "open",
+    "raise",
+    "set",
+    "shut",
+    "start",
+    "stop",
+    "switch",
+    "toggle",
+    "turn",
+    "unlock",
+}
 ACTIVE_CONVERSATION_TTL = timedelta(hours=6)
+
+
+def _starts_with_supported_local_action(text: str) -> bool:
+    """Return true only when text starts with a deterministic local action phrase."""
+    normalized = normalize_text(text)
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix} ")
+        for prefix in LOCAL_ACTION_PREFIXES
+    )
+
+
+def _looks_like_unknown_local_control_request(text: str) -> bool:
+    """Detect control-like utterances whose leading verb is not locally supported."""
+    normalized = normalize_text(text)
+    tokens = tokenize(normalized)
+    if not tokens:
+        return False
+    if _starts_with_supported_local_action(normalized):
+        return False
+    return tokens[0] in CONTROL_LIKE_VERB_TOKENS
+
+
 MAX_ACTIVE_CONVERSATIONS = 256
 OPEN_DOMAIN_PREFIXES = (
     "how do i",
@@ -421,9 +470,10 @@ class AgentRouter:
         trace.normalized_utterance = match_result.normalized_utterance
         trace.effective_area_hint = match_result.effective_area_hint
         trace.effective_super_area_hint = match_result.effective_super_area_hint
+        unknown_local_control_request = _looks_like_unknown_local_control_request(text)
 
         # 1) fuzzy attempt
-        if self._config.fuzzy_enabled and match_result.best is not None:
+        if self._config.fuzzy_enabled and match_result.best is not None and not unknown_local_control_request:
             trace.top_fuzzy_candidates = [
                 {
                     "candidate_id": c.candidate_id,
@@ -467,6 +517,7 @@ class AgentRouter:
                 assist_input = match_result.best.canonical_phrase
                 trace.rendered_from_pattern = False
                 trace.rendered_slots = {}
+                skip_fuzzy_execution = False
 
                 if match_result.best.candidate_type.value == "conversation_target":
                     matched_pattern = (
@@ -480,41 +531,60 @@ class AgentRouter:
                     assist_input = rendered.text or normalize_text(text)
                     trace.rendered_from_pattern = rendered.rendered_from_pattern
                     trace.rendered_slots = rendered.slots
+                    if self._rendered_pattern_has_empty_slots(rendered.slots):
+                        skip_fuzzy_execution = True
+                        trace.fuzzy_decision["allowed"] = False
+                        trace.fuzzy_decision["reason"] = "missing_required_slots"
+                        trace.fuzzy_decision["missing_slots"] = [
+                            slot_name
+                            for slot_name, value in rendered.slots.items()
+                            if not value.strip()
+                        ]
+                        _LOGGER.debug(
+                            "Skipping fuzzy conversation-target execution due to empty rendered slots: %s",
+                            trace.fuzzy_decision["missing_slots"],
+                        )
 
                 trace.assist_pipeline_input = assist_input
-                _LOGGER.debug("ROUTER PATH: FUZZY_LOCAL → calling adapter with input=%r", assist_input)
-                if _should_execute_branch():
-                    fuzzy_outcome = await self._agent_adapter.async_process(
-                        agent_id=self._config.local_agent_id,
-                        text=assist_input,
-                        language=language,
-                        conversation_id=conversation_id,
-                        context=context,
-                        device_id=device_id,
-                        satellite_id=satellite_id,
+                if skip_fuzzy_execution:
+                    _LOGGER.debug(
+                        "Fuzzy candidate rejected after render validation: %s",
+                        trace.fuzzy_decision["reason"],
                     )
                 else:
-                    fuzzy_outcome = None
-                _record_outcome("fuzzy_local", fuzzy_outcome)
-                self._update_conversation_tracking(
-                    conversation_id,
-                    fuzzy_outcome,
-                    executor="local",
-                    agent_id=self._config.local_agent_id,
-                )
-
-                if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
-                    _LOGGER.debug("ROUTER DECISION: FUZZY_LOCAL")
-                    if selected_path is None:
-                        selected_path = ResolutionPath.FUZZY_LOCAL
-                        selected_outcome = fuzzy_outcome
-                        trace.selected_path = ResolutionPath.FUZZY_LOCAL
-                        trace.final_executor = "local"
-                    if not debug_collect_all:
-                        return _result(
-                            path=ResolutionPath.FUZZY_LOCAL,
-                            outcome=fuzzy_outcome,
+                    _LOGGER.debug("ROUTER PATH: FUZZY_LOCAL → calling adapter with input=%r", assist_input)
+                    if _should_execute_branch():
+                        fuzzy_outcome = await self._agent_adapter.async_process(
+                            agent_id=self._config.local_agent_id,
+                            text=assist_input,
+                            language=language,
+                            conversation_id=conversation_id,
+                            context=context,
+                            device_id=device_id,
+                            satellite_id=satellite_id,
                         )
+                    else:
+                        fuzzy_outcome = None
+                    _record_outcome("fuzzy_local", fuzzy_outcome)
+                    self._update_conversation_tracking(
+                        conversation_id,
+                        fuzzy_outcome,
+                        executor="local",
+                        agent_id=self._config.local_agent_id,
+                    )
+
+                    if dry_run or (fuzzy_outcome is not None and fuzzy_outcome.success):
+                        _LOGGER.debug("ROUTER DECISION: FUZZY_LOCAL")
+                        if selected_path is None:
+                            selected_path = ResolutionPath.FUZZY_LOCAL
+                            selected_outcome = fuzzy_outcome
+                            trace.selected_path = ResolutionPath.FUZZY_LOCAL
+                            trace.final_executor = "local"
+                        if not debug_collect_all:
+                            return _result(
+                                path=ResolutionPath.FUZZY_LOCAL,
+                                outcome=fuzzy_outcome,
+                            )
             else:
                 candidate_detail = match_result.best.detail or {}
                 forced_area_resolution = (
@@ -565,6 +635,17 @@ class AgentRouter:
                             )
                 _LOGGER.debug("Fuzzy candidate rejected: %s", decision.reason)
 
+        if unknown_local_control_request:
+            trace.fuzzy_decision = {
+                "allowed": False,
+                "reason": "unknown_local_action",
+                "risk_tier": "high",
+                "best_score": getattr(match_result.best, "score", 0.0),
+                "threshold": self._config.fuzzy_threshold,
+                "ambiguity_gap": self._config.ambiguity_gap,
+            }
+            _LOGGER.debug("Fuzzy candidate rejected before execution: unknown local action")
+
         # 2) LLM translation to local
         direct_llm_only = self._should_bypass_local_pipeline_for_llm(
             text=text,
@@ -575,6 +656,8 @@ class AgentRouter:
             and selected_path is None
             and not direct_llm_only
         )
+        fuzzy_found_good_match = selected_path == ResolutionPath.FUZZY_LOCAL
+        translation_found_good_match = False
         if not should_run_llm_translation:
             trace.llm_translation_summary = {
                 "mode": "skipped",
@@ -624,6 +707,10 @@ class AgentRouter:
                 "confidence": translation.confidence,
                 "valid": translation.valid,
                 "notes": translation.notes,
+                "source": translation.source,
+                "intent_family": translation.intent_family,
+                "confidence_reason": translation.confidence_reason,
+                "debug": translation.debug,
             }
             trace.llm_translation_raw_text = translation.raw_text
             trace.llm_translation_tool_group = translation.tool_group
@@ -633,6 +720,9 @@ class AgentRouter:
                 and translation.valid
             )
             trace.llm_translation_tool_group_inferred = inferred_tool_group
+            translation_found_good_match = bool(
+                translation.valid and translation.canonical_text
+            )
 
             if translation.valid and translation.canonical_text:
                 if selected_path is None:
@@ -679,6 +769,11 @@ class AgentRouter:
         if direct_llm_only:
             trace.exact_local_executed = False
             trace.exact_local_outcome = "skipped"
+        elif unknown_local_control_request:
+            trace.exact_local_executed = False
+            trace.exact_local_outcome = "skipped"
+            trace.exact_local_error_code = "unknown_local_action"
+            _LOGGER.debug("EXACT_LOCAL skipped: unknown local action should route through LLM translation/fallback")
         else:
             _LOGGER.debug("ROUTER PATH: EXACT_LOCAL → calling adapter with input=%r", text)
             if _should_execute_branch():
@@ -738,8 +833,20 @@ class AgentRouter:
                     exact.response_text,
                 )
 
+        allow_final_llm_fallback = bool(
+            direct_llm_only
+            or (
+                selected_path is None
+                and not fuzzy_found_good_match
+                and not translation_found_good_match
+            )
+        )
+        if not allow_final_llm_fallback:
+            trace.llm_fallback_executed = False
+            trace.llm_fallback_outcome = "skipped"
+            trace.llm_fallback_error_code = "not_allowed_after_local_match"
         # 4) final direct llm fallback
-        if self._config.llm_fallback_enabled:
+        if self._config.llm_fallback_enabled and allow_final_llm_fallback:
             if _should_execute_branch():
                 _LOGGER.debug("ROUTER DECISION: LLM_FALLBACK (calling LLM)")
                 runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
@@ -913,6 +1020,10 @@ class AgentRouter:
             )
             return fallback
         return configured_agent_id
+
+    def _rendered_pattern_has_empty_slots(self, slots: dict[str, str]) -> bool:
+        """Return True when a rendered conversation pattern left any slot blank."""
+        return any(not value.strip() for value in slots.values())
 
     def _prune_active_conversations(self) -> None:
         """Drop stale active continuation state."""
@@ -1096,9 +1207,12 @@ class AgentRouter:
         extra_system_prompt: str | None,
     ) -> RouterResult | None:
         normalized = normalize_text(text)
-        trace.local_action_detected = any(
-            normalized.startswith(prefix) for prefix in LOCAL_ACTION_PREFIXES
-        )
+        unknown_local_control_request = _looks_like_unknown_local_control_request(normalized)
+        if unknown_local_control_request:
+            trace.local_action_detected = False
+            return None
+
+        trace.local_action_detected = _starts_with_supported_local_action(normalized)
         if not trace.local_action_detected:
             return None
 

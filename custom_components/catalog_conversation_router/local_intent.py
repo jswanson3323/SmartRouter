@@ -10,6 +10,15 @@ from .matcher import CANONICAL_ACTION_TEXT
 from .models import Catalog, ConversationTarget, EntityTarget, LLMTranslationResult
 from .phonetics import normalize_text, tokenize
 from .phrase_renderer import render_conversation_pattern
+from .semantic_intent import (
+    ENTITY_AMBIGUITY_GAP,
+    ENTITY_DIRECT_THRESHOLD,
+    PHRASE_DIRECT_THRESHOLD,
+    PHRASE_FILTER_THRESHOLD,
+    SemanticEntityCandidate,
+    SemanticIntentRanker,
+    SemanticPhraseCandidate,
+)
 
 SLOT_RE = re.compile(r"\{([^}]+)\}")
 
@@ -71,11 +80,11 @@ PHRASE_SKIP_WORDS = ["please"]
 
 ENTITY_ACTION_RULES: dict[str, dict[str, Any]] = {
     "turn_on": {
-        "rule": "(turn on | switch on | activate | start | enable)",
+        "rule": "(turn on | switch on)",
         "tool_groups": {"lighting", "fan", "climate", "media"},
     },
     "turn_off": {
-        "rule": "(turn off | switch off | deactivate | stop | disable | kill)",
+        "rule": "(turn off | switch off)",
         "tool_groups": {"lighting", "fan", "climate", "media"},
     },
     "open": {
@@ -95,7 +104,7 @@ ENTITY_ACTION_RULES: dict[str, dict[str, Any]] = {
         "tool_groups": {"locks"},
     },
     "query": {
-        "rule": "(what is | whats | what are | status of | status for | tell me | is)",
+        "rule": "(what is | whats | what are | status of | status for | tell me)",
         "tool_groups": {"lighting", "fan", "climate", "media", "covers", "locks", "timers", "lists"},
     },
 }
@@ -179,8 +188,8 @@ DOMAIN_SLOT_DEFS: dict[str, dict[str, Any]] = {
     },
 }
 LIGHTING_LOCATION_RULES: dict[str, str] = {
-    "turn_on": "(turn on | switch on | illuminate)",
-    "turn_off": "(turn off | switch off | darken)",
+    "turn_on": "(turn on | switch on)",
+    "turn_off": "(turn off | switch off)",
 }
 
 
@@ -201,6 +210,9 @@ class BuilderTarget:
 class LocalIntentResolver:
     """Resolve local translations without using the LLM translation layer."""
 
+    def __init__(self, semantic_ranker: SemanticIntentRanker | None = None) -> None:
+        self._semantic_ranker = semantic_ranker or SemanticIntentRanker()
+
     def resolve(
         self,
         *,
@@ -220,7 +232,11 @@ class LocalIntentResolver:
                 source=None,
                 intent_family=None,
                 confidence_reason="missing_hassil_dependency",
-                debug={"match_engine": "hassil"},
+                debug={
+                    "match_engine": "hassil",
+                    "semantic_available": self._semantic_ranker.available(),
+                    "semantic_error": self._semantic_ranker.unavailable_reason(),
+                },
                 raw_text=None,
             )
 
@@ -247,7 +263,11 @@ class LocalIntentResolver:
             source=None,
             intent_family=None,
             confidence_reason="no_fully_bound_result",
-            debug={"match_engine": "hassil"},
+            debug={
+                "match_engine": "hassil",
+                "semantic_available": self._semantic_ranker.available(),
+                "semantic_error": self._semantic_ranker.unavailable_reason(),
+            },
             raw_text=None,
         )
 
@@ -268,7 +288,21 @@ class LocalIntentResolver:
         if hassil is None:
             return None
 
-        intents = self._build_phrase_intents(catalog)
+        semantic_candidates = self._semantic_ranker.rank_phrase_candidates(
+            utterance=utterance,
+            catalog=catalog,
+            infer_tool_group=self._infer_tool_group_from_phrase,
+        )
+        allowed_target_ids = [
+            candidate.target_id
+            for candidate in semantic_candidates
+            if candidate.score >= PHRASE_FILTER_THRESHOLD
+        ]
+
+        intents = self._build_phrase_intents(
+            catalog,
+            allowed_target_ids=set(allowed_target_ids) if allowed_target_ids else None,
+        )
         result = hassil.recognize_best(
             utterance,
             intents,
@@ -276,7 +310,7 @@ class LocalIntentResolver:
             language=catalog.metadata.language or "en",
         )
         if result is None:
-            return None
+            return self._semantic_direct_phrase_match(semantic_candidates)
 
         metadata = result.intent_metadata or {}
         pattern = str(metadata.get("pattern", ""))
@@ -314,11 +348,19 @@ class LocalIntentResolver:
                 "canonical_pattern": canonical_pattern,
                 "target_id": target_id,
                 "slots": slots,
+                "semantic_candidates": [
+                    {
+                        "target_id": candidate.target_id,
+                        "score": round(candidate.score, 4),
+                        "example_text": candidate.example_text,
+                    }
+                    for candidate in semantic_candidates[:5]
+                ],
             },
             raw_text=None,
         )
 
-    def _build_phrase_intents(self, catalog: Catalog):
+    def _build_phrase_intents(self, catalog: Catalog, allowed_target_ids: set[str] | None = None):
         hassil = self._import_hassil()
         assert hassil is not None
 
@@ -326,6 +368,8 @@ class LocalIntentResolver:
         intents_data: dict[str, Any] = {"language": catalog.metadata.language or "en", "skip_words": PHRASE_SKIP_WORDS, "lists": slot_lists, "intents": {}}
 
         for target in catalog.conversation_targets:
+            if allowed_target_ids is not None and target.target_id not in allowed_target_ids:
+                continue
             patterns = self._conversation_target_patterns(target)
             if not patterns:
                 continue
@@ -350,6 +394,41 @@ class LocalIntentResolver:
                 intents_data["intents"][intent_name] = {"data": data_entries}
 
         return hassil.Intents.from_dict(intents_data)
+
+    def _semantic_direct_phrase_match(
+        self,
+        semantic_candidates: list[SemanticPhraseCandidate],
+    ) -> LLMTranslationResult | None:
+        if not semantic_candidates:
+            return None
+        best = semantic_candidates[0]
+        if best.score < PHRASE_DIRECT_THRESHOLD or not best.concrete or best.has_slots:
+            return None
+        return LLMTranslationResult(
+            mode="translate",
+            canonical_text=normalize_text(best.raw_text),
+            tool_group=best.tool_group,
+            confidence=min(0.97, best.score),
+            notes="semantic_phrase_match",
+            valid=True,
+            source="semantic_phrase_matcher",
+            intent_family=best.target_id,
+            confidence_reason="semantic_phrase_family_match",
+            debug={
+                "match_engine": "fastembed+hassil",
+                "semantic_candidates": [
+                    {
+                        "target_id": candidate.target_id,
+                        "score": round(candidate.score, 4),
+                        "example_text": candidate.example_text,
+                        "raw_text": candidate.raw_text,
+                        "concrete": candidate.concrete,
+                    }
+                    for candidate in semantic_candidates[:5]
+                ],
+            },
+            raw_text=None,
+        )
 
     def _ensure_phrase_slot_list(self, slot_lists: dict[str, dict[str, Any]], slot_name: str) -> None:
         if slot_name in slot_lists:
@@ -413,6 +492,13 @@ class LocalIntentResolver:
             return None
 
         targets = self._build_targets(catalog)
+        semantic_command_docs = self._semantic_entity_command_docs(targets)
+        semantic_candidates = self._semantic_ranker.rank_entity_commands(
+            utterance=utterance,
+            command_docs=semantic_command_docs,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
         intents = self._build_entity_intents(catalog, targets)
         result = hassil.recognize_best(
             utterance,
@@ -421,7 +507,10 @@ class LocalIntentResolver:
             language=catalog.metadata.language or "en",
         )
         if result is None:
-            return None
+            return self._semantic_direct_entity_match(
+                semantic_candidates=semantic_candidates,
+                targets=targets,
+            )
 
         action = self._result_slot_value(result, "action")
         if not action:
@@ -471,6 +560,65 @@ class LocalIntentResolver:
                 "area": matched.area,
                 "super_area": matched.super_area,
                 "synthetic": matched.synthetic,
+                "semantic_candidates": [
+                    {
+                        "action": candidate.action,
+                        "target_name": candidate.target_name,
+                        "score": round(candidate.score, 4),
+                    }
+                    for candidate in semantic_candidates[:5]
+                ],
+            },
+            raw_text=None,
+        )
+
+    def _semantic_direct_entity_match(
+        self,
+        *,
+        semantic_candidates: list[SemanticEntityCandidate],
+        targets: list[BuilderTarget],
+    ) -> LLMTranslationResult | None:
+        if not semantic_candidates:
+            return None
+        best = semantic_candidates[0]
+        second = semantic_candidates[1] if len(semantic_candidates) > 1 else None
+        if best.score < ENTITY_DIRECT_THRESHOLD:
+            return None
+        if second is not None and (best.score - second.score) < ENTITY_AMBIGUITY_GAP:
+            return None
+        matched = next(
+            (
+                target
+                for target in targets
+                if target.normalized_name == best.target_name and target.tool_group == best.tool_group
+            ),
+            None,
+        )
+        if matched is None or best.action not in matched.actions:
+            return None
+        return LLMTranslationResult(
+            mode="translate",
+            canonical_text=self._canonical_text_from_action_target(best.action, matched.name),
+            tool_group=matched.tool_group,
+            confidence=min(0.97, best.score),
+            notes="semantic_entity_match",
+            valid=True,
+            source="semantic_entity_matcher",
+            intent_family="entity_control" if best.action != "query" else "entity_query",
+            confidence_reason="semantic_entity_command_match",
+            debug={
+                "match_engine": "fastembed+hassil",
+                "target": matched.name,
+                "action": best.action,
+                "semantic_candidates": [
+                    {
+                        "action": candidate.action,
+                        "target_name": candidate.target_name,
+                        "score": round(candidate.score, 4),
+                        "synthetic": candidate.synthetic,
+                    }
+                    for candidate in semantic_candidates[:5]
+                ],
             },
             raw_text=None,
         )
@@ -619,6 +767,28 @@ class LocalIntentResolver:
                         }
                     )
         return values
+
+    def _semantic_entity_command_docs(self, targets: list[BuilderTarget]) -> list[dict[str, Any]]:
+        docs: list[dict[str, Any]] = []
+        for target in targets:
+            for action in sorted(target.actions):
+                if action == "set":
+                    continue
+                semantic_texts = [self._canonical_text_from_action_target(action, target.name)]
+                if target.synthetic and target.tool_group == "lighting" and target.area:
+                    semantic_texts.append(f"{CANONICAL_ACTION_TEXT.get(action, action)} {target.area}")
+                for semantic_text in semantic_texts:
+                    docs.append(
+                        {
+                            "action": action,
+                            "target_name": target.normalized_name,
+                            "tool_group": target.tool_group,
+                            "synthetic": target.synthetic,
+                            "singular": not target.synthetic and not target.normalized_name.endswith("s"),
+                            "semantic_text": semantic_text,
+                        }
+                    )
+        return docs
 
     def _build_targets(self, catalog: Catalog) -> list[BuilderTarget]:
         targets: dict[str, BuilderTarget] = {}

@@ -7,6 +7,10 @@ from custom_components.catalog_conversation_router.models import (
     ConversationTarget,
     EntityTarget,
 )
+from custom_components.catalog_conversation_router.semantic_intent import (
+    SemanticEntityCandidate,
+    SemanticPhraseCandidate,
+)
 
 
 def _conversation_target(target_id: str, pattern: str) -> ConversationTarget:
@@ -94,6 +98,24 @@ def _catalog() -> Catalog:
     )
 
 
+class _FakeSemanticRanker:
+    def __init__(self, *, phrase=None, entity=None):
+        self._phrase = phrase or []
+        self._entity = entity or []
+
+    def available(self) -> bool:
+        return True
+
+    def unavailable_reason(self):
+        return None
+
+    def rank_phrase_candidates(self, **kwargs):
+        return list(self._phrase)
+
+    def rank_entity_commands(self, **kwargs):
+        return list(self._entity)
+
+
 def test_phrase_match_optional_words_render_concrete_phrase() -> None:
     result = LocalIntentResolver().resolve(
         utterance="set timer for five minutes",
@@ -148,13 +170,26 @@ def test_entity_builder_declines_ambiguous_partial_command() -> None:
 
 
 def test_entity_builder_uses_intent_grammar_for_illuminate() -> None:
-    result = LocalIntentResolver().resolve(
+    result = LocalIntentResolver(
+        semantic_ranker=_FakeSemanticRanker(
+            entity=[
+                SemanticEntityCandidate(
+                    action="turn_on",
+                    target_name="office lights",
+                    tool_group="lighting",
+                    score=0.92,
+                    synthetic=True,
+                    singular=False,
+                )
+            ]
+        )
+    ).resolve(
         utterance="illuminate the office",
         catalog=_catalog(),
     )
 
     assert result.valid is True
-    assert result.source == "entity_builder"
+    assert result.source == "semantic_entity_matcher"
     assert result.canonical_text == "turn on office lights"
 
 
@@ -179,14 +214,27 @@ def test_entity_builder_uses_origin_area_for_generic_kill_the_fan() -> None:
         conversation_targets=[],
     )
 
-    result = LocalIntentResolver().resolve(
+    result = LocalIntentResolver(
+        semantic_ranker=_FakeSemanticRanker(
+            entity=[
+                SemanticEntityCandidate(
+                    action="turn_off",
+                    target_name="office fan",
+                    tool_group="fan",
+                    score=0.9,
+                    synthetic=False,
+                    singular=True,
+                )
+            ]
+        )
+    ).resolve(
         utterance="kill the fan",
         catalog=catalog,
         origin_area="Office",
     )
 
     assert result.valid is True
-    assert result.source == "entity_builder"
+    assert result.source == "semantic_entity_matcher"
     assert result.canonical_text == "turn off office fan"
 
 
@@ -218,14 +266,27 @@ def test_entity_builder_uses_plural_area_group_for_kill_the_fans() -> None:
         conversation_targets=[],
     )
 
-    result = LocalIntentResolver().resolve(
+    result = LocalIntentResolver(
+        semantic_ranker=_FakeSemanticRanker(
+            entity=[
+                SemanticEntityCandidate(
+                    action="turn_off",
+                    target_name="office fans",
+                    tool_group="fan",
+                    score=0.9,
+                    synthetic=True,
+                    singular=False,
+                )
+            ]
+        )
+    ).resolve(
         utterance="kill the fans",
         catalog=catalog,
         origin_area="Office",
     )
 
     assert result.valid is True
-    assert result.source == "entity_builder"
+    assert result.source == "semantic_entity_matcher"
     assert result.canonical_text == "turn off office fans"
 
 
@@ -265,3 +326,85 @@ def test_entity_builder_declines_singular_light_when_only_plural_group_is_clear(
 
     assert result.valid is False
     assert result.canonical_text is None
+
+
+def test_semantic_phrase_match_can_resolve_timer_status_by_meaning() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r5",
+            last_refreshed="now",
+            language="en",
+            entity_count=0,
+            conversation_target_count=1,
+        ),
+        entity_targets=[],
+        conversation_targets=[
+            _conversation_target("manual:timer-status", "do i have a timer running"),
+        ],
+    )
+    ranker = _FakeSemanticRanker(
+        phrase=[
+            SemanticPhraseCandidate(
+                target_id="manual:timer-status",
+                example_text="do i have a timer running",
+                raw_text="do i have a timer running",
+                score=0.91,
+                concrete=True,
+                has_slots=False,
+                tool_group="timers",
+            )
+        ]
+    )
+
+    result = LocalIntentResolver(semantic_ranker=ranker).resolve(
+        utterance="did i set a timer",
+        catalog=catalog,
+    )
+
+    assert result.valid is True
+    assert result.source == "semantic_phrase_matcher"
+    assert result.canonical_text == "do i have a timer running"
+
+
+def test_semantic_entity_match_can_resolve_office_fan_by_meaning() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r6",
+            last_refreshed="now",
+            language="en",
+            entity_count=1,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "fan.office",
+                "Office Fan",
+                domain="fan",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "set", "query"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    ranker = _FakeSemanticRanker(
+        entity=[
+            SemanticEntityCandidate(
+                action="turn_off",
+                target_name="office fan",
+                tool_group="fan",
+                score=0.9,
+                synthetic=False,
+                singular=True,
+            )
+        ]
+    )
+
+    result = LocalIntentResolver(semantic_ranker=ranker).resolve(
+        utterance="kill the fan",
+        catalog=catalog,
+        origin_area="Office",
+    )
+
+    assert result.valid is True
+    assert result.source == "semantic_entity_matcher"
+    assert result.canonical_text == "turn off office fan"

@@ -267,6 +267,12 @@ class LocalIntentResolver:
                 "match_engine": "hassil",
                 "semantic_available": self._semantic_ranker.available(),
                 "semantic_error": self._semantic_ranker.unavailable_reason(),
+                **self._semantic_debug_snapshot(
+                    utterance=utterance,
+                    catalog=catalog,
+                    origin_area=origin_area,
+                    origin_super_area=origin_super_area,
+                ),
             },
             raw_text=None,
         )
@@ -622,6 +628,56 @@ class LocalIntentResolver:
             },
             raw_text=None,
         )
+
+    def _semantic_debug_snapshot(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> dict[str, Any]:
+        if not self._semantic_ranker.available():
+            return {}
+
+        phrase_candidates = self._semantic_ranker.rank_phrase_candidates(
+            utterance=utterance,
+            catalog=catalog,
+            infer_tool_group=self._infer_tool_group_from_phrase,
+            limit=3,
+        )
+        targets = self._build_targets(catalog)
+        entity_candidates = self._semantic_ranker.rank_entity_commands(
+            utterance=utterance,
+            command_docs=self._semantic_entity_command_docs(targets),
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+            limit=3,
+        )
+        return {
+            "semantic_phrase_candidates": [
+                {
+                    "target_id": candidate.target_id,
+                    "score": round(candidate.score, 4),
+                    "example_text": candidate.example_text,
+                    "raw_text": candidate.raw_text,
+                    "concrete": candidate.concrete,
+                    "has_slots": candidate.has_slots,
+                }
+                for candidate in phrase_candidates
+            ],
+            "semantic_entity_candidates": [
+                {
+                    "action": candidate.action,
+                    "target_name": candidate.target_name,
+                    "tool_group": candidate.tool_group,
+                    "score": round(candidate.score, 4),
+                    "synthetic": candidate.synthetic,
+                    "singular": candidate.singular,
+                }
+                for candidate in entity_candidates
+            ],
+        }
 
     def _build_entity_intents(self, catalog: Catalog, targets: list[BuilderTarget]):
         hassil = self._import_hassil()

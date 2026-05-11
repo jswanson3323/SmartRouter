@@ -21,6 +21,7 @@ CONF_CATALOG_AUTO_REFRESH_ENABLED: Final = "catalog_auto_refresh_enabled"
 CONF_HIGH_RISK_THRESHOLD: Final = "high_risk_threshold"
 CONF_MAX_LLM_CANDIDATES: Final = "max_llm_candidates"
 CONF_MANUAL_TARGETS: Final = "manual_targets"
+CONF_SEMANTIC_SERVICE_URL: Final = "semantic_service_url"
 
 DEFAULT_FUZZY_ENABLED: Final = True
 DEFAULT_FUZZY_THRESHOLD: Final = 0.84
@@ -31,6 +32,7 @@ DEFAULT_DEBUG_ENABLED: Final = False
 DEFAULT_CATALOG_AUTO_REFRESH_ENABLED: Final = True
 DEFAULT_HIGH_RISK_THRESHOLD: Final = 0.96
 DEFAULT_MAX_LLM_CANDIDATES: Final = 20
+DEFAULT_SEMANTIC_SERVICE_URL: Final = ""
 
 SERVICE_REBUILD_CATALOG: Final = "rebuild_catalog"
 SERVICE_GET_CATALOG_STATS: Final = "get_catalog_stats"

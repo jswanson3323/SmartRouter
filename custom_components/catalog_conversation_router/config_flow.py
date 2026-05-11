@@ -24,6 +24,7 @@ from .const import (
     CONF_LOCAL_AGENT_ID,
     CONF_MANUAL_TARGETS,
     CONF_MAX_LLM_CANDIDATES,
+    CONF_SEMANTIC_SERVICE_URL,
     CONF_TRANSLATE_LLM_AGENT_ID,
     DEFAULT_AMBIGUITY_GAP,
     DEFAULT_CATALOG_AUTO_REFRESH_ENABLED,
@@ -34,6 +35,7 @@ from .const import (
     DEFAULT_LLM_FALLBACK_ENABLED,
     DEFAULT_LLM_TRANSLATE_ENABLED,
     DEFAULT_MAX_LLM_CANDIDATES,
+    DEFAULT_SEMANTIC_SERVICE_URL,
     DOMAIN,
 )
 from .ha_conversation_agents import (
@@ -79,6 +81,9 @@ def build_router_config(data: dict[str, Any]) -> dict[str, Any]:
         ),
         CONF_HIGH_RISK_THRESHOLD: min(max(high_risk_threshold, 0.0), 1.0),
         CONF_MAX_LLM_CANDIDATES: max(1, max_llm_candidates),
+        CONF_SEMANTIC_SERVICE_URL: str(
+            data.get(CONF_SEMANTIC_SERVICE_URL, DEFAULT_SEMANTIC_SERVICE_URL)
+        ).strip(),
         CONF_MANUAL_TARGETS: data.get(CONF_MANUAL_TARGETS, []),
     }
 
@@ -241,6 +246,10 @@ class CatalogConversationRouterConfigFlow(config_entries.ConfigFlow, domain=DOMA
                         CONF_MAX_LLM_CANDIDATES,
                         default=DEFAULT_MAX_LLM_CANDIDATES,
                     ): vol.All(vol.Coerce(int), vol.Range(min=1, max=200)),
+                    vol.Optional(
+                        CONF_SEMANTIC_SERVICE_URL,
+                        default=DEFAULT_SEMANTIC_SERVICE_URL,
+                    ): str,
                 }
             ),
             errors=errors,
@@ -452,6 +461,16 @@ class CatalogConversationRouterOptionsFlow(config_entries.OptionsFlow):
                         ),
                     ),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1, max=200)),
+                vol.Optional(
+                    CONF_SEMANTIC_SERVICE_URL,
+                    default=self._entry.options.get(
+                        CONF_SEMANTIC_SERVICE_URL,
+                        self._entry.data.get(
+                            CONF_SEMANTIC_SERVICE_URL,
+                            DEFAULT_SEMANTIC_SERVICE_URL,
+                        ),
+                    ),
+                ): str,
                 vol.Optional(
                     "manual_targets_json",
                     default=json.dumps(current_manual, indent=2),

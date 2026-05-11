@@ -35,6 +35,7 @@ from .const import (
     CONF_MANUAL_TARGETS,
     CONF_MAX_LLM_CANDIDATES,
     CONF_TRANSLATE_LLM_AGENT_ID,
+    CONF_SEMANTIC_SERVICE_URL,
     DEFAULT_AMBIGUITY_GAP,
     DEFAULT_CATALOG_AUTO_REFRESH_ENABLED,
     DEFAULT_DEBUG_ENABLED,
@@ -44,6 +45,7 @@ from .const import (
     DEFAULT_LLM_FALLBACK_ENABLED,
     DEFAULT_LLM_TRANSLATE_ENABLED,
     DEFAULT_MAX_LLM_CANDIDATES,
+    DEFAULT_SEMANTIC_SERVICE_URL,
     DOMAIN,
     PLATFORMS,
 )
@@ -123,6 +125,10 @@ def _entry_to_config(entry: ConfigEntry) -> RouterConfig:
             CONF_MAX_LLM_CANDIDATES,
             DEFAULT_MAX_LLM_CANDIDATES,
         ),
+        semantic_service_url=merged.get(
+            CONF_SEMANTIC_SERVICE_URL,
+            DEFAULT_SEMANTIC_SERVICE_URL,
+        ),
         manual_targets=merged.get(CONF_MANUAL_TARGETS, []),
     )
 
@@ -187,7 +193,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     agent_adapter = AgentAdapter(hass)
     matcher = FuzzyMatcher(cfg.fuzzy_threshold, cfg.ambiguity_gap)
-    llm_adapter = LLMAdapter(agent_adapter)
+    llm_adapter = LLMAdapter(
+        agent_adapter,
+        semantic_service_url=cfg.semantic_service_url,
+    )
     router = AgentRouter(
         config=cfg,
         catalog_manager=catalog_manager,

@@ -31,6 +31,10 @@ The router currently evaluates an utterance in this order:
 5. `llm_fallback`
    - If enabled, the original utterance is sent directly to the configured LLM agent.
 
+The local translation stage can also use an optional semantic ranking sidecar.
+When configured through `semantic_service_url`, the router can ask an external
+service to retrieve intent families by meaning before binding them locally.
+
 If the router is already inside an active continued conversation, it uses a hybrid continuation model:
 - active local Home Assistant conversation -> direct local handoff
 - active LLM fallback conversation:

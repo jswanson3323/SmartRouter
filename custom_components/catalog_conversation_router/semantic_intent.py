@@ -7,8 +7,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-import numpy as np
-
 from .models import Catalog, ConversationTarget
 from .phonetics import normalize_text
 
@@ -194,13 +192,16 @@ class SemanticIntentRanker:
             return None
 
     def _cosine(self, left: Any, right: Any) -> float:
-        left_arr = np.asarray(left, dtype=np.float32)
-        right_arr = np.asarray(right, dtype=np.float32)
-        left_norm = float(np.linalg.norm(left_arr))
-        right_norm = float(np.linalg.norm(right_arr))
+        left_values = [float(value) for value in left]
+        right_values = [float(value) for value in right]
+        if len(left_values) != len(right_values):
+            return 0.0
+        left_norm = sum(value * value for value in left_values) ** 0.5
+        right_norm = sum(value * value for value in right_values) ** 0.5
         if left_norm == 0.0 or right_norm == 0.0:
             return 0.0
-        return float(np.dot(left_arr, right_arr) / (left_norm * right_norm))
+        dot = sum(left_value * right_value for left_value, right_value in zip(left_values, right_values, strict=False))
+        return float(dot / (left_norm * right_norm))
 
     def _semantic_phrase_text(self, text: str) -> str:
         if not text:

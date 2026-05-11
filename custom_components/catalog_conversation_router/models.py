@@ -333,6 +333,7 @@ class RouterConfig:
     catalog_auto_refresh_enabled: bool
     high_risk_threshold: float
     max_llm_candidates: int
+    semantic_service_url: str = ""
     manual_targets: list[dict[str, Any]] = field(default_factory=list)
 
 

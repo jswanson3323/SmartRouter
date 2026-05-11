@@ -1,0 +1,26 @@
+name: Catalog Router Semantic Service
+version: "0.1.0"
+slug: catalog_router_semantic
+description: Semantic intent ranking sidecar for Catalog Conversation Router
+url: "https://github.com/example/catalog-conversation-router"
+startup: services
+boot: auto
+init: false
+arch:
+  - aarch64
+  - amd64
+  - armv7
+  - i386
+  - armhf
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: Semantic ranking API
+options:
+  host: 0.0.0.0
+  port: 8099
+  model_name: BAAI/bge-small-en-v1.5
+schema:
+  host: str
+  port: port
+  model_name: str

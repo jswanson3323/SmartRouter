@@ -11,6 +11,7 @@ from typing import Any
 from .local_intent import LocalIntentResolver
 from .models import Catalog, LLMTranslationResult
 from .phonetics import normalize_text, tokenize
+from .semantic_service import RemoteSemanticIntentRanker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,9 +120,14 @@ TRANSLATION_PAYLOADS: dict[int, dict[str, Any]] = {}
 class LLMAdapter:
     """Build prompts and parse structured translation output."""
 
-    def __init__(self, agent_adapter) -> None:
+    def __init__(self, agent_adapter, *, semantic_service_url: str = "") -> None:
         self._agent_adapter = agent_adapter
-        self._local_intent_resolver = LocalIntentResolver()
+        semantic_ranker = (
+            RemoteSemanticIntentRanker(semantic_service_url)
+            if semantic_service_url.strip()
+            else None
+        )
+        self._local_intent_resolver = LocalIntentResolver(semantic_ranker=semantic_ranker)
 
     async def async_translate_for_local(
         self,

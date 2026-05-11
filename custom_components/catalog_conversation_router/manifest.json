@@ -20,7 +20,6 @@
     "custom_components.catalog_conversation_router"
   ],
   "requirements": [
-    "hassil==3.5.0",
-    "fastembed==0.8.0"
+    "hassil==3.5.0"
   ]
 }

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+from functools import partial
 from typing import Any
 
 from .local_intent import LocalIntentResolver
@@ -145,6 +146,17 @@ class LLMAdapter:
     ) -> LLMTranslationResult:
         """Resolve a local translation without using the LLM."""
         del llm_agent_id, language, max_candidates, conversation_id, context, preserve_raw_text
+        hass = getattr(self._agent_adapter, "hass", None)
+        if hass is not None and hasattr(hass, "async_add_executor_job"):
+            return await hass.async_add_executor_job(
+                partial(
+                    self._local_intent_resolver.resolve,
+                    utterance=utterance,
+                    catalog=catalog,
+                    origin_area=origin_area,
+                    origin_super_area=origin_super_area,
+                )
+            )
         return self._local_intent_resolver.resolve(
             utterance=utterance,
             catalog=catalog,

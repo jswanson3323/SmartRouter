@@ -16,6 +16,11 @@ class AgentAdapter:
     def __init__(self, hass: Any) -> None:
         self._hass = hass
 
+    @property
+    def hass(self) -> Any:
+        """Return the Home Assistant instance."""
+        return self._hass
+
     async def async_process(
         self,
         *,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any
@@ -18,6 +19,7 @@ class RemoteSemanticIntentRanker:
     def __init__(self, service_url: str) -> None:
         self._service_url = service_url.rstrip("/")
         self._last_error: str | None = None
+        self._timeout = float(os.getenv("CCR_SEMANTIC_TIMEOUT", "12.0"))
 
     def available(self) -> bool:
         return bool(self._service_url)
@@ -106,11 +108,12 @@ class RemoteSemanticIntentRanker:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=0.75) as response:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 response_body = response.read().decode("utf-8")
         except (urllib.error.URLError, TimeoutError, ValueError) as err:
             self._last_error = str(err)
             return None
+        self._last_error = None
         try:
             return json.loads(response_body)
         except json.JSONDecodeError as err:

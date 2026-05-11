@@ -78,7 +78,7 @@ class SemanticService:
                     )
                 )
 
-        ranked = self._rank(self._semantic_phrase_text(request.utterance), [doc[2] for doc in docs], request.limit)
+        ranked = self._rank(self._semantic_phrase_text(request.utterance), [doc[2] for doc in docs])
         candidates = []
         seen: set[str] = set()
         for idx, score in ranked:
@@ -102,7 +102,7 @@ class SemanticService:
     def rank_entity(self, request: EntityRequest) -> dict[str, Any]:
         query_text = self._normalize_text(request.utterance)
 
-        ranked = self._rank(query_text, [doc.semantic_text for doc in request.commands], request.limit)
+        ranked = self._rank(query_text, [doc.semantic_text for doc in request.commands])
         candidates = []
         deduped: dict[tuple[str, str], dict[str, Any]] = {}
         for idx, score in ranked:
@@ -141,7 +141,7 @@ class SemanticService:
         ]
         return {"candidates": candidates}
 
-    def _rank(self, utterance: str, docs: list[str], limit: int) -> list[tuple[int, float]]:
+    def _rank(self, utterance: str, docs: list[str]) -> list[tuple[int, float]]:
         if not utterance or not docs:
             return []
         vectors = list(self.embedder.embed([utterance, *docs]))
@@ -150,7 +150,7 @@ class SemanticService:
         for idx, doc_vector in enumerate(vectors[1:]):
             results.append((idx, self._cosine(utter_vector, doc_vector)))
         results.sort(key=lambda item: item[1], reverse=True)
-        return results[:limit]
+        return results
 
     def _semantic_phrase_text(self, text: str) -> str:
         stripped = SLOT_RE.sub(lambda match: f" {self._normalize_text(match.group(1))} ", text)

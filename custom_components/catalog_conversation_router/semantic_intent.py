@@ -91,7 +91,6 @@ class SemanticIntentRanker:
         ranked = self._rank(
             utterance=self._semantic_phrase_text(utterance),
             docs=[doc_text for _, _, doc_text, _, _, _ in docs],
-            limit=limit,
         )
         results: list[SemanticPhraseCandidate] = []
         for idx, score in ranked:
@@ -127,7 +126,6 @@ class SemanticIntentRanker:
         ranked = self._rank(
             utterance=query_text,
             docs=[doc["semantic_text"] for doc in command_docs],
-            limit=limit,
         )
         results: list[SemanticEntityCandidate] = []
         utterance_norm = normalize_text(utterance)
@@ -157,7 +155,7 @@ class SemanticIntentRanker:
                 deduped[key] = candidate
         return sorted(deduped.values(), key=lambda item: item.score, reverse=True)[:limit]
 
-    def _rank(self, *, utterance: str, docs: list[str], limit: int) -> list[tuple[int, float]]:
+    def _rank(self, *, utterance: str, docs: list[str]) -> list[tuple[int, float]]:
         embedder = self._get_embedder()
         if embedder is None or not utterance or not docs:
             return []
@@ -171,7 +169,7 @@ class SemanticIntentRanker:
             score = self._cosine(utter_vector, doc_vector)
             results.append((idx, score))
         results.sort(key=lambda item: item[1], reverse=True)
-        return results[:limit]
+        return results
 
     def _get_embedder(self) -> Any | None:
         if self._embedder is not None:

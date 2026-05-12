@@ -18,9 +18,11 @@ from .models import (
     ActiveConversationState,
     EntityTarget,
     LocalAgentOutcome,
+    LLMTranslationResult,
     ParsedStateQuery,
     ResolutionPath,
     ResolutionTrace,
+    ResolvedLocalCommand,
     RouterConfig,
     RouterResult,
     StreamingFallbackRequest,
@@ -784,6 +786,9 @@ class AgentRouter:
                 "source": translation.source,
                 "intent_family": translation.intent_family,
                 "confidence_reason": translation.confidence_reason,
+                "resolved_commands": [
+                    command.canonical_text for command in translation.resolved_commands
+                ],
                 "debug": translation.debug,
             }
             trace.llm_translation_raw_text = translation.raw_text
@@ -801,19 +806,26 @@ class AgentRouter:
             if translation.valid and translation.canonical_text:
                 if selected_path is None:
                     trace.chosen_canonical_phrase = translation.canonical_text
-                    trace.assist_pipeline_input = translation.canonical_text
+                    trace.assist_pipeline_input = (
+                        translation.canonical_text
+                        if not translation.resolved_commands
+                        else ", ".join(
+                            command.canonical_text for command in translation.resolved_commands
+                        )
+                    )
                     trace.rendered_from_pattern = False
                     trace.rendered_slots = {}
                 _LOGGER.debug("ROUTER PATH: LLM_TRANSLATED_LOCAL → calling adapter with input=%r", translation.canonical_text)
                 if _should_execute_branch():
-                    translated_outcome = await self._agent_adapter.async_process(
-                        agent_id=self._config.local_agent_id,
-                        text=translation.canonical_text,
+                    translated_outcome = await self._execute_local_translation(
+                        translation=translation,
                         language=language,
                         conversation_id=conversation_id,
                         context=context,
                         device_id=device_id,
                         satellite_id=satellite_id,
+                        extra_system_prompt=None,
+                        trace=trace,
                     )
                 else:
                     translated_outcome = None
@@ -1408,6 +1420,9 @@ class AgentRouter:
             "source": translation.source,
             "intent_family": translation.intent_family,
             "confidence_reason": translation.confidence_reason,
+            "resolved_commands": [
+                command.canonical_text for command in translation.resolved_commands
+            ],
             "debug": translation.debug,
         }
         if not (translation.valid and translation.canonical_text):
@@ -1415,18 +1430,22 @@ class AgentRouter:
             return None
 
         trace.chosen_canonical_phrase = translation.canonical_text
-        trace.assist_pipeline_input = translation.canonical_text
+        trace.assist_pipeline_input = (
+            translation.canonical_text
+            if not translation.resolved_commands
+            else ", ".join(command.canonical_text for command in translation.resolved_commands)
+        )
         trace.rendered_from_pattern = False
         trace.rendered_slots = {}
-        translated_outcome = await self._agent_adapter.async_process(
-            agent_id=self._config.local_agent_id,
-            text=translation.canonical_text,
+        translated_outcome = await self._execute_local_translation(
+            translation=translation,
             language=language,
             conversation_id=None,
             context=context,
             device_id=device_id,
             satellite_id=satellite_id,
             extra_system_prompt=extra_system_prompt,
+            trace=trace,
         )
         trace.llm_translated_local_executed = True
         trace.llm_translated_local_outcome = (
@@ -1538,6 +1557,115 @@ class AgentRouter:
     def _resolve_initial_llm_fallback_conversation_id(self) -> str | None:
         """Start first-turn LLM fallback fresh to avoid replaying outer chat history."""
         return None
+
+    async def _execute_local_translation(
+        self,
+        *,
+        translation: LLMTranslationResult,
+        language: str,
+        conversation_id: str | None,
+        context: Any,
+        device_id: str | None,
+        satellite_id: str | None,
+        extra_system_prompt: str | None,
+        trace: ResolutionTrace,
+    ) -> LocalAgentOutcome:
+        commands = (
+            translation.resolved_commands
+            if translation.resolved_commands
+            else []
+        )
+        if not commands and translation.canonical_text:
+            commands = [ResolvedLocalCommand(canonical_text=translation.canonical_text)]
+        if not commands:
+            return LocalAgentOutcome(
+                success=False,
+                response=None,
+                response_text=None,
+                failure_category=None,
+                raw=None,
+            )
+
+        if len(commands) == 1:
+            trace.compound_local_commands = []
+            trace.compound_local_outcomes = []
+            trace.compound_local_partial_success = False
+            return await self._agent_adapter.async_process(
+                agent_id=self._config.local_agent_id,
+                text=commands[0].canonical_text,
+                language=language,
+                conversation_id=conversation_id,
+                context=context,
+                device_id=device_id,
+                satellite_id=satellite_id,
+                extra_system_prompt=extra_system_prompt,
+            )
+
+        trace.compound_local_commands = [command.canonical_text for command in commands]
+        outcomes: list[LocalAgentOutcome] = []
+        for command in commands:
+            outcomes.append(
+                await self._agent_adapter.async_process(
+                    agent_id=self._config.local_agent_id,
+                    text=command.canonical_text,
+                    language=language,
+                    conversation_id=conversation_id,
+                    context=context,
+                    device_id=device_id,
+                    satellite_id=satellite_id,
+                    extra_system_prompt=extra_system_prompt,
+                )
+            )
+
+        trace.compound_local_outcomes = [
+            {
+                "command": command.canonical_text,
+                "success": outcome.success,
+                "response_text": outcome.response_text,
+                "response_type": outcome.response_type,
+                "error_code": outcome.error_code,
+                "failure_category": (
+                    outcome.failure_category.value if outcome.failure_category is not None else None
+                ),
+            }
+            for command, outcome in zip(commands, outcomes, strict=False)
+        ]
+
+        successes = [outcome for outcome in outcomes if outcome.success]
+        failures = [outcome for outcome in outcomes if not outcome.success]
+        trace.compound_local_partial_success = bool(successes and failures)
+        if not successes:
+            return outcomes[-1]
+
+        success_texts = [
+            f"{command.canonical_text}: {outcome.response_text or 'done'}"
+            for command, outcome in zip(commands, outcomes, strict=False)
+            if outcome.success
+        ]
+        failure_texts = [
+            f"{command.canonical_text}: {outcome.response_text or outcome.error_code or 'failed'}"
+            for command, outcome in zip(commands, outcomes, strict=False)
+            if not outcome.success
+        ]
+        response_parts: list[str] = []
+        if success_texts:
+            response_parts.append("Done: " + "; ".join(success_texts))
+        if failure_texts:
+            response_parts.append("Failed: " + "; ".join(failure_texts))
+
+        last_success = successes[-1]
+        return LocalAgentOutcome(
+            success=True,
+            response=outcomes,
+            response_text=". ".join(response_parts),
+            failure_category=None,
+            raw=outcomes,
+            response_type="action_done",
+            error_code=None if not failures else "partial_success",
+            processed_locally=all(outcome.processed_locally is True for outcome in successes),
+            conversation_id=last_success.conversation_id,
+            continue_conversation=last_success.continue_conversation,
+        )
 
     def _build_llm_state_enrichment(
         self,

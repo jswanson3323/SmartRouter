@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .matcher import CANONICAL_ACTION_TEXT
-from .models import Catalog, ConversationTarget, EntityTarget, LLMTranslationResult
+from .models import Catalog, ConversationTarget, EntityTarget, LLMTranslationResult, ResolvedLocalCommand
 from .phonetics import normalize_text, tokenize
 from .phrase_renderer import render_conversation_pattern
 from .semantic_intent import (
@@ -194,6 +194,16 @@ LIGHTING_LOCATION_RULES: dict[str, str] = {
     "turn_on": "(turn on | switch on)",
     "turn_off": "(turn off | switch off)",
 }
+COMPOUND_ACTION_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("switch off", "turn_off"),
+    ("turn off", "turn_off"),
+    ("switch on", "turn_on"),
+    ("turn on", "turn_on"),
+    ("unlock", "unlock"),
+    ("close", "close"),
+    ("open", "open"),
+    ("lock", "lock"),
+)
 
 
 @dataclass(slots=True)
@@ -246,6 +256,15 @@ class LocalIntentResolver:
         phrase_result = self._match_phrase_intent(utterance=utterance, catalog=catalog)
         if phrase_result is not None:
             return phrase_result
+
+        compound_result = self._match_compound_entity_intent(
+            utterance=utterance,
+            catalog=catalog,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if compound_result is not None:
+            return compound_result
 
         entity_result = self._build_entity_command(
             utterance=utterance,
@@ -508,6 +527,150 @@ class LocalIntentResolver:
                 if not (tokens & NUMBER_WORDS or any(token.isdigit() for token in tokens)):
                     return False
         return True
+
+    def _match_compound_entity_intent(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> LLMTranslationResult | None:
+        segments = self._parse_compound_segments(utterance)
+        if segments is None or len(segments) < 2:
+            return None
+
+        resolved_commands: list[ResolvedLocalCommand] = []
+        effective_area = origin_area
+        effective_super_area = origin_super_area
+        debug_segments: list[dict[str, Any]] = []
+
+        for action, target_text, explicit_action in segments:
+            segment_utterance = self._compound_segment_utterance(
+                action=action,
+                target_text=target_text,
+            )
+            segment_result = self._build_entity_command(
+                utterance=segment_utterance,
+                catalog=catalog,
+                origin_area=effective_area,
+                origin_super_area=effective_super_area,
+            )
+            if segment_result is None or not segment_result.valid or not segment_result.canonical_text:
+                return None
+
+            segment_debug = dict(segment_result.debug or {})
+            resolved = ResolvedLocalCommand(
+                canonical_text=segment_result.canonical_text,
+                action=str(segment_debug.get("action") or action),
+                target_name=str(segment_debug.get("target") or ""),
+                tool_group=str(segment_debug.get("tool_group") or segment_result.tool_group or ""),
+                area=str(segment_debug.get("area") or "") or None,
+                super_area=str(segment_debug.get("super_area") or "") or None,
+                source=segment_result.source,
+            )
+            resolved_commands.append(resolved)
+            debug_segments.append(
+                {
+                    "input": segment_utterance,
+                    "action": resolved.action,
+                    "explicit_action": explicit_action,
+                    "canonical_text": resolved.canonical_text,
+                    "target": resolved.target_name,
+                    "area": resolved.area,
+                    "super_area": resolved.super_area,
+                    "tool_group": resolved.tool_group,
+                    "source": resolved.source,
+                }
+            )
+            if resolved.area:
+                effective_area = resolved.area
+            if resolved.super_area:
+                effective_super_area = resolved.super_area
+
+        canonical_commands = [command.canonical_text for command in resolved_commands]
+        return LLMTranslationResult(
+            mode="translate",
+            canonical_text=" and ".join(canonical_commands),
+            tool_group="mixed" if len({command.tool_group for command in resolved_commands}) > 1 else resolved_commands[0].tool_group,
+            confidence=0.9,
+            notes="compound_entity_builder_match",
+            valid=True,
+            source="compound_entity_matcher",
+            intent_family="compound_entity_control",
+            confidence_reason="fully_resolved_compound_entity_command",
+            debug={
+                "match_engine": "compound+hassil",
+                "segments": debug_segments,
+            },
+            raw_text=None,
+            resolved_commands=resolved_commands,
+        )
+
+    def _parse_compound_segments(
+        self,
+        utterance: str,
+    ) -> list[tuple[str, str, bool]] | None:
+        normalized = normalize_text(utterance)
+        if " and " not in normalized:
+            return None
+
+        chunks = [chunk.strip() for chunk in normalized.split(" and ") if chunk.strip()]
+        if len(chunks) < 2:
+            return None
+
+        segments: list[tuple[str, str, bool]] = []
+        current_action: str | None = None
+        for index, chunk in enumerate(chunks):
+            parsed = self._parse_compound_segment_chunk(chunk)
+            if parsed is None:
+                if current_action is None:
+                    return None
+                action = current_action
+                target_text = self._strip_leading_articles(chunk)
+                explicit_action = False
+            else:
+                action, target_text = parsed
+                current_action = action
+                explicit_action = True
+
+            if action not in {"turn_on", "turn_off", "open", "close", "lock", "unlock"}:
+                return None
+            if not target_text:
+                return None
+            segments.append((action, target_text, explicit_action))
+
+            if index == 0 and not explicit_action:
+                return None
+
+        if not any(not explicit_action for _, _, explicit_action in segments[1:]) and not any(
+            explicit_action and index > 0 for index, (_, _, explicit_action) in enumerate(segments)
+        ):
+            return None
+        return segments
+
+    def _parse_compound_segment_chunk(self, chunk: str) -> tuple[str, str] | None:
+        for prefix, action in COMPOUND_ACTION_PREFIXES:
+            if chunk == prefix or chunk.startswith(f"{prefix} "):
+                remainder = chunk.removeprefix(prefix).strip()
+                return action, self._strip_leading_articles(remainder)
+        return None
+
+    def _compound_segment_utterance(
+        self,
+        *,
+        action: str,
+        target_text: str,
+    ) -> str:
+        action_text = CANONICAL_ACTION_TEXT.get(action, action)
+        return f"{action_text} {self._strip_leading_articles(target_text)}".strip()
+
+    def _strip_leading_articles(self, text: str) -> str:
+        cleaned = normalize_text(text)
+        tokens = cleaned.split()
+        while tokens and tokens[0] in {"the", "a", "an"}:
+            tokens.pop(0)
+        return " ".join(tokens)
 
     def _build_entity_command(
         self,

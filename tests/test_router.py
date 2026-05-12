@@ -14,6 +14,7 @@ from custom_components.catalog_conversation_router.models import (
     CatalogMetadata,
     ConversationTarget,
     LocalAgentOutcome,
+    ResolvedLocalCommand,
     RouterConfig,
 )
 
@@ -113,7 +114,7 @@ class _Candidate:
 
 
 class _Translation:
-    def __init__(self, valid, canonical_text, *, mode=None, tool_group="lighting", notes=""):
+    def __init__(self, valid, canonical_text, *, mode=None, tool_group="lighting", notes="", resolved_commands=None):
         self.mode = mode or ("translate" if valid else "general")
         self.canonical_text = canonical_text
         self.tool_group = tool_group
@@ -125,6 +126,7 @@ class _Translation:
         self.confidence_reason = None
         self.debug = None
         self.raw_text = None
+        self.resolved_commands = resolved_commands or []
 
 
 class _Classification:
@@ -379,6 +381,156 @@ def test_llm_translated_local_success() -> None:
     )
     assert result.path.value == "llm_translated_local"
     assert router._llm_adapter.translate_calls[-1]["llm_agent_id"] == "translate-llm"
+
+
+def test_llm_translated_local_executes_compound_commands_in_order() -> None:
+    match = _MatchResult(best=None, top=[])
+    translation = _Translation(
+        True,
+        "turn on office light and turn on office fan",
+        mode="translate",
+        tool_group="mixed",
+        resolved_commands=[
+            ResolvedLocalCommand(canonical_text="turn on office light"),
+            ResolvedLocalCommand(canonical_text="turn on office fan"),
+        ],
+    )
+    agent_adapter = _FakeAgentAdapter([_outcome(True, "Light on"), _outcome(True, "Fan on")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=agent_adapter,
+        llm_adapter=_FakeLLMAdapter(translation, _outcome(True)),
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the office light and fan",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert [call["text"] for call in agent_adapter.calls] == [
+        "turn on office light",
+        "turn on office fan",
+    ]
+    assert result.trace.compound_local_commands == [
+        "turn on office light",
+        "turn on office fan",
+    ]
+    assert result.trace.compound_local_partial_success is False
+
+
+def test_llm_translated_local_reports_partial_success_for_compound_commands() -> None:
+    match = _MatchResult(best=None, top=[])
+    translation = _Translation(
+        True,
+        "turn on office light and turn on office fan",
+        mode="translate",
+        tool_group="mixed",
+        resolved_commands=[
+            ResolvedLocalCommand(canonical_text="turn on office light"),
+            ResolvedLocalCommand(canonical_text="turn on office fan"),
+        ],
+    )
+    agent_adapter = _FakeAgentAdapter(
+        [
+            _outcome(True, "Office light turned on"),
+            LocalAgentOutcome(
+                success=False,
+                response=None,
+                response_text="No device called office fan",
+                failure_category=None,
+                raw=None,
+                response_type="error",
+                error_code="entity_not_found",
+            ),
+        ]
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=agent_adapter,
+        llm_adapter=_FakeLLMAdapter(translation, _outcome(True)),
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the office light and fan",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert result.outcome.success is True
+    assert "Done:" in (result.outcome.response_text or "")
+    assert "Failed:" in (result.outcome.response_text or "")
+    assert result.trace.compound_local_partial_success is True
+
+
+def test_translate_mode_compound_failure_returns_failed_when_all_subcommands_fail() -> None:
+    match = _MatchResult(best=None, top=[])
+    translation = _Translation(
+        True,
+        "turn on office light and turn on office fan",
+        mode="translate",
+        tool_group="mixed",
+        resolved_commands=[
+            ResolvedLocalCommand(canonical_text="turn on office light"),
+            ResolvedLocalCommand(canonical_text="turn on office fan"),
+        ],
+    )
+    agent_adapter = _FakeAgentAdapter(
+        [
+            LocalAgentOutcome(
+                success=False,
+                response=None,
+                response_text="No device called office light",
+                failure_category=None,
+                raw=None,
+                response_type="error",
+                error_code="entity_not_found",
+            ),
+            LocalAgentOutcome(
+                success=False,
+                response=None,
+                response_text="No device called office fan",
+                failure_category=None,
+                raw=None,
+                response_type="error",
+                error_code="entity_not_found",
+            ),
+        ]
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=agent_adapter,
+        llm_adapter=_FakeLLMAdapter(translation, _outcome(True, "llm answer")),
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the office light and fan",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "failed"
+    assert result.trace.compound_local_partial_success is False
 
 
 def test_non_translate_classification_is_traced_but_does_not_change_routing() -> None:

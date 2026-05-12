@@ -328,6 +328,131 @@ def test_entity_builder_declines_singular_light_when_only_plural_group_is_clear(
     assert result.canonical_text is None
 
 
+def test_compound_entity_builder_resolves_shared_action_with_inherited_area() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r4b",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.office",
+                "Office Light",
+                domain="light",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+            _entity_target(
+                "fan.office",
+                "Office Fan",
+                domain="fan",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+
+    result = LocalIntentResolver().resolve(
+        utterance="turn on the office light and fan",
+        catalog=catalog,
+    )
+
+    assert result.valid is True
+    assert result.notes == "compound_entity_builder_match"
+    assert [command.canonical_text for command in result.resolved_commands] == [
+        "turn on office light",
+        "turn on office fan",
+    ]
+
+
+def test_compound_entity_builder_resolves_mixed_actions() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r4c",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.office",
+                "Office Light",
+                domain="light",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+            _entity_target(
+                "fan.office",
+                "Office Fan",
+                domain="fan",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+
+    result = LocalIntentResolver().resolve(
+        utterance="turn on the office light and turn off the fan",
+        catalog=catalog,
+    )
+
+    assert result.valid is True
+    assert [command.canonical_text for command in result.resolved_commands] == [
+        "turn on office light",
+        "turn off office fan",
+    ]
+
+
+def test_compound_entity_builder_rejects_ambiguous_inherited_target() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r4d",
+            last_refreshed="now",
+            language="en",
+            entity_count=3,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.office",
+                "Office Light",
+                domain="light",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+            _entity_target(
+                "fan.office_ceiling",
+                "Office Ceiling Fan",
+                domain="fan",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+            _entity_target(
+                "fan.office_desk",
+                "Office Desk Fan",
+                domain="fan",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+
+    result = LocalIntentResolver().resolve(
+        utterance="turn on the office light and fan",
+        catalog=catalog,
+    )
+
+    assert result.valid is False
+    assert result.resolved_commands == []
+
+
 def test_semantic_phrase_match_can_resolve_timer_status_by_meaning() -> None:
     catalog = Catalog(
         metadata=CatalogMetadata(

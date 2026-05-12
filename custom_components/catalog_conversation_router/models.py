@@ -154,6 +154,19 @@ class LocalAgentOutcome:
 
 
 @dataclass(slots=True)
+class ResolvedLocalCommand:
+    """A single canonical local command resolved from an utterance."""
+
+    canonical_text: str
+    action: str | None = None
+    target_name: str | None = None
+    tool_group: str | None = None
+    area: str | None = None
+    super_area: str | None = None
+    source: str | None = None
+
+
+@dataclass(slots=True)
 class LLMTranslationResult:
     """Structured LLM translation payload."""
 
@@ -168,6 +181,7 @@ class LLMTranslationResult:
     confidence_reason: str | None = None
     debug: dict[str, Any] | None = None
     raw_text: str | None = None
+    resolved_commands: list[ResolvedLocalCommand] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -269,6 +283,9 @@ class ResolutionTrace:
     semantic_request_routing_source: str | None = None
     llm_fallback_prompt_hint_applied: bool | None = None
     llm_fallback_prompt_hint: str | None = None
+    compound_local_commands: list[str] = field(default_factory=list)
+    compound_local_outcomes: list[dict[str, Any]] = field(default_factory=list)
+    compound_local_partial_success: bool | None = None
     final_executor: str | None = None
     catalog_revision: str | None = None
     started_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())

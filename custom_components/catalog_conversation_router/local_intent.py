@@ -540,34 +540,48 @@ class LocalIntentResolver:
         if segments is None or len(segments) < 2:
             return None
 
+        targets = self._build_targets(catalog)
         resolved_commands: list[ResolvedLocalCommand] = []
         effective_area = origin_area
         effective_super_area = origin_super_area
         debug_segments: list[dict[str, Any]] = []
 
         for action, target_text, explicit_action in segments:
-            segment_utterance = self._compound_segment_utterance(
+            resolved = self._resolve_compound_segment_target(
+                targets=targets,
                 action=action,
                 target_text=target_text,
-            )
-            segment_result = self._build_entity_command(
-                utterance=segment_utterance,
-                catalog=catalog,
                 origin_area=effective_area,
                 origin_super_area=effective_super_area,
             )
-            if segment_result is None or not segment_result.valid or not segment_result.canonical_text:
-                return None
+            if resolved is None:
+                segment_utterance = self._compound_segment_utterance(
+                    action=action,
+                    target_text=target_text,
+                )
+                segment_result = self._build_entity_command(
+                    utterance=segment_utterance,
+                    catalog=catalog,
+                    origin_area=effective_area,
+                    origin_super_area=effective_super_area,
+                )
+                if segment_result is None or not segment_result.valid or not segment_result.canonical_text:
+                    return None
 
-            segment_debug = dict(segment_result.debug or {})
-            resolved = ResolvedLocalCommand(
-                canonical_text=segment_result.canonical_text,
-                action=str(segment_debug.get("action") or action),
-                target_name=str(segment_debug.get("target") or ""),
-                tool_group=str(segment_debug.get("tool_group") or segment_result.tool_group or ""),
-                area=str(segment_debug.get("area") or "") or None,
-                super_area=str(segment_debug.get("super_area") or "") or None,
-                source=segment_result.source,
+                segment_debug = dict(segment_result.debug or {})
+                resolved = ResolvedLocalCommand(
+                    canonical_text=segment_result.canonical_text,
+                    action=str(segment_debug.get("action") or action),
+                    target_name=str(segment_debug.get("target") or ""),
+                    tool_group=str(segment_debug.get("tool_group") or segment_result.tool_group or ""),
+                    area=str(segment_debug.get("area") or "") or None,
+                    super_area=str(segment_debug.get("super_area") or "") or None,
+                    source=segment_result.source,
+                )
+
+            segment_utterance = self._compound_segment_utterance(
+                action=action,
+                target_text=target_text,
             )
             resolved_commands.append(resolved)
             debug_segments.append(
@@ -671,6 +685,129 @@ class LocalIntentResolver:
         while tokens and tokens[0] in {"the", "a", "an"}:
             tokens.pop(0)
         return " ".join(tokens)
+
+    def _resolve_compound_segment_target(
+        self,
+        *,
+        targets: list[BuilderTarget],
+        action: str,
+        target_text: str,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> ResolvedLocalCommand | None:
+        normalized_target = self._normalize_display_name(target_text)
+        if not normalized_target:
+            return None
+
+        generic = self._resolve_compound_generic_domain_target(
+            targets=targets,
+            action=action,
+            target_text=normalized_target,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if generic is not None:
+            return generic
+
+        area_hint = self._normalize_display_name(origin_area) or None
+        super_area_hint = self._normalize_display_name(origin_super_area) or None
+        candidates = [
+            target
+            for target in targets
+            if action in target.actions
+            and (
+                target.normalized_name == normalized_target
+                or target.normalized_name.endswith(f" {normalized_target}")
+            )
+        ]
+        candidates = self._filter_by_location(
+            candidates,
+            area_hint=area_hint,
+            super_area_hint=super_area_hint,
+        )
+        if len(candidates) != 1:
+            return None
+        matched = candidates[0]
+        return ResolvedLocalCommand(
+            canonical_text=self._canonical_text_from_action_target(action, matched.name),
+            action=action,
+            target_name=matched.name,
+            tool_group=matched.tool_group,
+            area=matched.area,
+            super_area=matched.super_area,
+            source="compound_fast_matcher",
+        )
+
+    def _resolve_compound_generic_domain_target(
+        self,
+        *,
+        targets: list[BuilderTarget],
+        action: str,
+        target_text: str,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> ResolvedLocalCommand | None:
+        tool_group, singular = self._infer_compound_domain_target(target_text)
+        if tool_group is None:
+            return None
+
+        class _CompoundDomainEntity:
+            def __init__(self, text: str) -> None:
+                self.value = text
+                self.text_clean = text
+
+        matched = self._resolve_domain_target(
+            targets=targets,
+            action=action,
+            tool_group=tool_group,
+            domain_entity=_CompoundDomainEntity(target_text),
+            location_entity=None,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if matched is None:
+            return None
+        if singular and matched.synthetic:
+            return None
+        return ResolvedLocalCommand(
+            canonical_text=self._canonical_text_from_action_target(action, matched.name),
+            action=action,
+            target_name=matched.name,
+            tool_group=matched.tool_group,
+            area=matched.area,
+            super_area=matched.super_area,
+            source="compound_fast_matcher",
+        )
+
+    def _infer_compound_domain_target(self, target_text: str) -> tuple[str | None, bool]:
+        normalized = self._normalize_display_name(target_text)
+        mapping = {
+            "light": ("lighting", True),
+            "lights": ("lighting", False),
+            "lamp": ("lighting", True),
+            "lamps": ("lighting", False),
+            "fan": ("fan", True),
+            "fans": ("fan", False),
+            "thermostat": ("climate", True),
+            "temperature": ("climate", True),
+            "heater": ("climate", True),
+            "speaker": ("media", True),
+            "speakers": ("media", False),
+            "tv": ("media", True),
+            "television": ("media", True),
+            "receiver": ("media", True),
+            "lock": ("locks", True),
+            "locks": ("locks", False),
+            "garage door": ("covers", True),
+            "door": ("covers", True),
+            "cover": ("covers", True),
+            "covers": ("covers", False),
+            "shade": ("covers", True),
+            "shades": ("covers", False),
+            "blind": ("covers", True),
+            "blinds": ("covers", False),
+        }
+        return mapping.get(normalized, (None, False))
 
     def _build_entity_command(
         self,

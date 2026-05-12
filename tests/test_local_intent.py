@@ -367,6 +367,10 @@ def test_compound_entity_builder_resolves_shared_action_with_inherited_area() ->
         "turn on office light",
         "turn on office fan",
     ]
+    assert [command.source for command in result.resolved_commands] == [
+        "compound_fast_matcher",
+        "compound_fast_matcher",
+    ]
 
 
 def test_compound_entity_builder_resolves_mixed_actions() -> None:
@@ -406,6 +410,51 @@ def test_compound_entity_builder_resolves_mixed_actions() -> None:
     assert [command.canonical_text for command in result.resolved_commands] == [
         "turn on office light",
         "turn off office fan",
+    ]
+
+
+def test_compound_entity_builder_uses_origin_area_for_partial_named_targets() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r4cc",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.office_drum",
+                "Office Drum Light",
+                domain="light",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+            _entity_target(
+                "fan.office",
+                "Office Fan",
+                domain="fan",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "query"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+
+    result = LocalIntentResolver().resolve(
+        utterance="turn on the drum light and fan",
+        catalog=catalog,
+        origin_area="Office",
+    )
+
+    assert result.valid is True
+    assert [command.canonical_text for command in result.resolved_commands] == [
+        "turn on office drum light",
+        "turn on office fan",
+    ]
+    assert [command.source for command in result.resolved_commands] == [
+        "compound_fast_matcher",
+        "compound_fast_matcher",
     ]
 
 

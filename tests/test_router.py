@@ -466,6 +466,8 @@ def test_compound_local_control_skips_fuzzy_and_uses_origin_area_translation() -
         "turn on office drum light",
     ]
     assert result.trace.fuzzy_decision["reason"] == "compound_local_control_request"
+    assert result.trace.exact_local_outcome == "skipped"
+    assert result.trace.exact_local_error_code == "compound_local_control_request"
     assert result.trace.llm_translation_summary["resolved_commands"] == [
         "turn on office fan",
         "turn on office drum light",

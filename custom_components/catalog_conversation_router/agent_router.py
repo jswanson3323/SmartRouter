@@ -882,6 +882,11 @@ class AgentRouter:
             trace.exact_local_outcome = "skipped"
             trace.exact_local_error_code = "unknown_local_action"
             _LOGGER.debug("EXACT_LOCAL skipped: unknown local action should route through LLM translation/fallback")
+        elif compound_local_control_request:
+            trace.exact_local_executed = False
+            trace.exact_local_outcome = "skipped"
+            trace.exact_local_error_code = "compound_local_control_request"
+            _LOGGER.debug("EXACT_LOCAL skipped: compound local control request should route through local translation")
         else:
             _LOGGER.debug("ROUTER PATH: EXACT_LOCAL → calling adapter with input=%r", text)
             if _should_execute_branch():

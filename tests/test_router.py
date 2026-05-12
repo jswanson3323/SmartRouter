@@ -48,6 +48,8 @@ class _FakeMatcher:
                 "origin_super_area": origin_super_area,
             }
         )
+        if isinstance(self._result, list):
+            return self._result.pop(0)
         return self._result
 
 
@@ -72,10 +74,14 @@ class _FakeLLMAdapter:
 
     async def async_classify_request(self, **kwargs):
         self.classify_calls.append(kwargs)
+        if isinstance(self._classification, list):
+            return self._classification.pop(0)
         return self._classification
 
     async def async_translate_for_local(self, **kwargs):
         self.translate_calls.append(kwargs)
+        if isinstance(self._translation, list):
+            return self._translation.pop(0)
         return self._translation
 
     async def async_final_fallback(self, **kwargs):
@@ -427,26 +433,27 @@ def test_llm_translated_local_executes_compound_commands_in_order() -> None:
 
 
 def test_compound_local_control_skips_fuzzy_and_uses_origin_area_translation() -> None:
-    best = _Candidate("turn on office drum light", score=0.91)
-    match = _MatchResult(best=best, top=[best])
-    translation = _Translation(
+    fan_match = _MatchResult(best=_Candidate("turn on office fan", score=0.91), top=[_Candidate("turn on office fan", score=0.91)])
+    drum_match = _MatchResult(best=_Candidate("turn on office drum light", score=0.91), top=[_Candidate("turn on office drum light", score=0.91)])
+    matcher = _FakeMatcher([fan_match, drum_match])
+    llm_adapter = _FakeLLMAdapter(_Translation(
         True,
         "turn on office fan and turn on office drum light",
         mode="translate",
         tool_group="mixed",
         notes="compound_entity_builder_match",
         resolved_commands=[
-            ResolvedLocalCommand(canonical_text="turn on office fan"),
-            ResolvedLocalCommand(canonical_text="turn on office drum light"),
+            ResolvedLocalCommand(canonical_text="turn on office fan", action="turn_on"),
+            ResolvedLocalCommand(canonical_text="turn on office drum light", action="turn_on"),
         ],
-    )
+    ), _outcome(True))
     agent_adapter = _FakeAgentAdapter([_outcome(True, "Fan on"), _outcome(True, "Drum light on")])
     router = AgentRouter(
         config=_config(),
         catalog_manager=_FakeCatalogManager(),
-        matcher=_FakeMatcher(match),
+        matcher=matcher,
         agent_adapter=agent_adapter,
-        llm_adapter=_FakeLLMAdapter(translation, _outcome(True)),
+        llm_adapter=llm_adapter,
         hass=None,
     )
 
@@ -461,6 +468,9 @@ def test_compound_local_control_skips_fuzzy_and_uses_origin_area_translation() -
     )
 
     assert result.path.value == "llm_translated_local"
+    assert len(matcher.calls) == 2
+    assert len(llm_adapter.classify_calls) == 1
+    assert llm_adapter.translate_calls == []
     assert [call["text"] for call in agent_adapter.calls] == [
         "turn on office fan",
         "turn on office drum light",
@@ -472,6 +482,71 @@ def test_compound_local_control_skips_fuzzy_and_uses_origin_area_translation() -
         "turn on office fan",
         "turn on office drum light",
     ]
+
+
+def test_compound_local_control_falls_back_with_original_utterance_when_segments_cannot_resolve() -> None:
+    matcher = _FakeMatcher([_MatchResult(best=None, top=[]), _MatchResult(best=None, top=[])])
+    llm_adapter = _FakeLLMAdapter(
+        [
+            _Translation(False, None),
+            _Translation(False, None),
+        ],
+        _outcome(True, "llm answer"),
+        classification=_Classification("tool_request", 0.95, intent_family="entity_control"),
+    )
+    agent_adapter = _FakeAgentAdapter([])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=matcher,
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the light and fan",
+            language="en",
+            conversation_id=None,
+            context=None,
+            origin_area="Office",
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert agent_adapter.calls == []
+    assert llm_adapter.fallback_calls[-1]["utterance"] == "turn on the light and fan"
+    assert len(llm_adapter.translate_calls) == 2
+
+
+def test_open_domain_and_phrase_is_not_split_and_falls_back_as_original_utterance() -> None:
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _outcome(True, "llm answer"),
+        classification=_Classification("general_request", 0.99, intent_family="general"),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult(best=None, top=[])),
+        agent_adapter=_FakeAgentAdapter([]),
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="I want to know how trigonometry and pi work together",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert llm_adapter.translate_calls == []
+    assert llm_adapter.fallback_calls[-1]["utterance"] == "I want to know how trigonometry and pi work together"
 
 
 def test_llm_translated_local_reports_partial_success_for_compound_commands() -> None:

@@ -3,17 +3,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Any
 
 from .catalog import CatalogManager
 from .ha_conversation_agents import get_registered_llm_agents
 from .llm_adapter import LLMAdapter
+from .local_intent import COMPOUND_ACTION_PREFIXES
 from .matcher import FuzzyMatcher
+from .matcher import CANONICAL_ACTION_TEXT
 from .models import (
     ActiveConversationState,
     EntityTarget,
@@ -491,24 +495,100 @@ class AgentRouter:
             trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
             return state_result
 
-        fuzzy_started = perf_counter()
-        match_result = self._matcher.match(
-            text,
-            catalog,
-            origin_area=resolved_origin_area,
-            origin_super_area=resolved_origin_super_area,
-        )
-        trace.fuzzy_match_duration_ms = round((perf_counter() - fuzzy_started) * 1000, 3)
-        _LOGGER.debug(
-            "FUZZY MATCH: best=%s score=%s",
-            getattr(match_result.best, "canonical_phrase", None),
-            getattr(match_result.best, "score", None),
-        )
+        unknown_local_control_request = _looks_like_unknown_local_control_request(text)
+        compound_local_control_request = _looks_like_compound_local_control_request(text)
+        semantic_request_classification: SemanticRequestClassification | None = None
+        direct_llm_only = False
+        compound_pipeline_failed = False
+        if compound_local_control_request:
+            semantic_request_classification = await self._llm_adapter.async_classify_request(
+                utterance=text,
+                catalog=catalog,
+            )
+            trace.semantic_request_classification_available = (
+                semantic_request_classification is not None
+            )
+            if semantic_request_classification is not None:
+                trace.semantic_request_classification_kind = (
+                    semantic_request_classification.kind
+                )
+                trace.semantic_request_classification_confidence = round(
+                    semantic_request_classification.confidence,
+                    4,
+                )
+                trace.semantic_request_classification_intent_family = (
+                    semantic_request_classification.intent_family
+                )
+                trace.semantic_request_classification_reason = (
+                    semantic_request_classification.reason
+                )
+                trace.semantic_request_classification_debug = (
+                    semantic_request_classification.debug
+                )
+                direct_llm_only = bool(
+                    semantic_request_classification.kind == "general_request"
+                    and semantic_request_classification.confidence
+                    >= REQUEST_GENERAL_BYPASS_THRESHOLD
+                )
+                trace.semantic_request_routing_source = (
+                    "semantic_classifier" if direct_llm_only else "semantic_classifier_advisory"
+                )
+            else:
+                direct_llm_only = self._should_bypass_local_pipeline_for_llm(
+                    text=text,
+                    catalog=catalog,
+                )
+                trace.semantic_request_routing_source = (
+                    "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
+                )
+
+            if not direct_llm_only:
+                compound_result = await self._try_compound_local_control(
+                    text=text,
+                    language=language,
+                    conversation_id=conversation_id,
+                    context=context,
+                    trace=trace,
+                    catalog=catalog,
+                    origin_area=resolved_origin_area,
+                    origin_super_area=resolved_origin_super_area,
+                    device_id=device_id,
+                    satellite_id=satellite_id,
+                )
+                if compound_result is not None:
+                    trace.selected_path = compound_result.path
+                    trace.final_executor = "local"
+                    trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+                    return compound_result
+            compound_pipeline_failed = True
+
+        if compound_local_control_request:
+            match_result = SimpleNamespace(
+                best=None,
+                top_candidates=[],
+                normalized_utterance=normalize_text(text),
+                effective_area_hint=normalize_text(resolved_origin_area) if resolved_origin_area else None,
+                effective_super_area_hint=normalize_text(resolved_origin_super_area) if resolved_origin_super_area else None,
+                inferred_action=None,
+            )
+            trace.fuzzy_match_duration_ms = 0.0
+        else:
+            fuzzy_started = perf_counter()
+            match_result = self._matcher.match(
+                text,
+                catalog,
+                origin_area=resolved_origin_area,
+                origin_super_area=resolved_origin_super_area,
+            )
+            trace.fuzzy_match_duration_ms = round((perf_counter() - fuzzy_started) * 1000, 3)
+            _LOGGER.debug(
+                "FUZZY MATCH: best=%s score=%s",
+                getattr(match_result.best, "canonical_phrase", None),
+                getattr(match_result.best, "score", None),
+            )
         trace.normalized_utterance = match_result.normalized_utterance
         trace.effective_area_hint = match_result.effective_area_hint
         trace.effective_super_area_hint = match_result.effective_super_area_hint
-        unknown_local_control_request = _looks_like_unknown_local_control_request(text)
-        compound_local_control_request = _looks_like_compound_local_control_request(text)
 
         # 1) fuzzy attempt
         if (
@@ -700,68 +780,20 @@ class AgentRouter:
             _LOGGER.debug("Fuzzy candidate rejected before execution: compound local control request")
 
         # 2) LLM translation to local
-        semantic_request_classification = await self._llm_adapter.async_classify_request(
-            utterance=text,
-            catalog=catalog,
-        )
-        trace.semantic_request_classification_available = (
-            semantic_request_classification is not None
-        )
-        if semantic_request_classification is not None:
-            trace.semantic_request_classification_kind = (
-                semantic_request_classification.kind
-            )
-            trace.semantic_request_classification_confidence = round(
-                semantic_request_classification.confidence,
-                4,
-            )
-            trace.semantic_request_classification_intent_family = (
-                semantic_request_classification.intent_family
-            )
-            trace.semantic_request_classification_reason = (
-                semantic_request_classification.reason
-            )
-            trace.semantic_request_classification_debug = (
-                semantic_request_classification.debug
-            )
-            direct_llm_only = bool(
-                semantic_request_classification.kind == "general_request"
-                and semantic_request_classification.confidence
-                >= REQUEST_GENERAL_BYPASS_THRESHOLD
-            )
-            trace.semantic_request_routing_source = (
-                "semantic_classifier" if direct_llm_only else "semantic_classifier_advisory"
-            )
-        else:
-            direct_llm_only = self._should_bypass_local_pipeline_for_llm(
-                text=text,
-                catalog=catalog,
-            )
-            trace.semantic_request_routing_source = (
-                "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
-            )
-        should_run_llm_translation = (
-            self._config.llm_translate_enabled
-            and selected_path is None
-            and not direct_llm_only
-        )
-        fuzzy_found_good_match = selected_path == ResolutionPath.FUZZY_LOCAL
-        translation_found_good_match = False
-        if not should_run_llm_translation:
+        if compound_local_control_request:
+            should_run_llm_translation = False
+            fuzzy_found_good_match = False
+            translation_found_good_match = False
             trace.llm_translation_summary = {
                 "mode": "skipped",
                 "confidence": 0.0,
                 "tool_group": None,
                 "valid": False,
                 "notes": (
-                    "skipped_due_to_fuzzy_match"
-                    if selected_path == ResolutionPath.FUZZY_LOCAL
-                    else "semantic_general_request_bypass"
+                    "semantic_general_request_bypass"
                     if direct_llm_only
                     and trace.semantic_request_routing_source == "semantic_classifier"
-                    else "direct_llm_only"
-                    if direct_llm_only
-                    else "skipped"
+                    else "compound_resolution_failed"
                 ),
                 "debug": {
                     "semantic_request_routing_source": trace.semantic_request_routing_source,
@@ -771,7 +803,79 @@ class AgentRouter:
                 },
             }
             trace.llm_translated_local_executed = False
-        if should_run_llm_translation:
+        else:
+            semantic_request_classification = await self._llm_adapter.async_classify_request(
+                utterance=text,
+                catalog=catalog,
+            )
+            trace.semantic_request_classification_available = (
+                semantic_request_classification is not None
+            )
+            if semantic_request_classification is not None:
+                trace.semantic_request_classification_kind = (
+                    semantic_request_classification.kind
+                )
+                trace.semantic_request_classification_confidence = round(
+                    semantic_request_classification.confidence,
+                    4,
+                )
+                trace.semantic_request_classification_intent_family = (
+                    semantic_request_classification.intent_family
+                )
+                trace.semantic_request_classification_reason = (
+                    semantic_request_classification.reason
+                )
+                trace.semantic_request_classification_debug = (
+                    semantic_request_classification.debug
+                )
+                direct_llm_only = bool(
+                    semantic_request_classification.kind == "general_request"
+                    and semantic_request_classification.confidence
+                    >= REQUEST_GENERAL_BYPASS_THRESHOLD
+                )
+                trace.semantic_request_routing_source = (
+                    "semantic_classifier" if direct_llm_only else "semantic_classifier_advisory"
+                )
+            else:
+                direct_llm_only = self._should_bypass_local_pipeline_for_llm(
+                    text=text,
+                    catalog=catalog,
+                )
+                trace.semantic_request_routing_source = (
+                    "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
+                )
+            should_run_llm_translation = (
+                self._config.llm_translate_enabled
+                and selected_path is None
+                and not direct_llm_only
+            )
+            fuzzy_found_good_match = selected_path == ResolutionPath.FUZZY_LOCAL
+            translation_found_good_match = False
+            if not should_run_llm_translation:
+                trace.llm_translation_summary = {
+                    "mode": "skipped",
+                    "confidence": 0.0,
+                    "tool_group": None,
+                    "valid": False,
+                    "notes": (
+                        "skipped_due_to_fuzzy_match"
+                        if selected_path == ResolutionPath.FUZZY_LOCAL
+                        else "semantic_general_request_bypass"
+                        if direct_llm_only
+                        and trace.semantic_request_routing_source == "semantic_classifier"
+                        else "direct_llm_only"
+                        if direct_llm_only
+                        else "skipped"
+                    ),
+                    "debug": {
+                        "semantic_request_routing_source": trace.semantic_request_routing_source,
+                        "semantic_request_classification_kind": trace.semantic_request_classification_kind,
+                        "semantic_request_classification_confidence": trace.semantic_request_classification_confidence,
+                        "semantic_request_classification_intent_family": trace.semantic_request_classification_intent_family,
+                    },
+                }
+                trace.llm_translated_local_executed = False
+        if not compound_local_control_request and should_run_llm_translation:
             runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
                 self._config.translate_llm_agent_id
             )
@@ -948,6 +1052,7 @@ class AgentRouter:
 
         allow_final_llm_fallback = bool(
             direct_llm_only
+            or compound_pipeline_failed
             or (
                 selected_path is None
                 and not fuzzy_found_good_match
@@ -1589,6 +1694,276 @@ class AgentRouter:
         """Start first-turn LLM fallback fresh to avoid replaying outer chat history."""
         return None
 
+    async def _try_compound_local_control(
+        self,
+        *,
+        text: str,
+        language: str,
+        conversation_id: str | None,
+        context: Any,
+        trace: ResolutionTrace,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+        device_id: str | None,
+        satellite_id: str | None,
+    ) -> RouterResult | None:
+        segments = self._parse_compound_local_segments(text)
+        if not segments:
+            return None
+
+        resolved_commands: list[ResolvedLocalCommand] = []
+        effective_area = origin_area
+        effective_super_area = origin_super_area
+        debug_segments: list[dict[str, Any]] = []
+
+        for action, target_text, explicit_action in segments:
+            segment_text = self._compound_segment_text(action=action, target_text=target_text)
+            resolved = self._resolve_compound_segment_via_fuzzy(
+                text=segment_text,
+                catalog=catalog,
+                origin_area=effective_area,
+                origin_super_area=effective_super_area,
+            )
+            if resolved is None:
+                translation = await self._llm_adapter.async_translate_for_local(
+                    llm_agent_id=self._config.translate_llm_agent_id,
+                    utterance=segment_text,
+                    language=language,
+                    catalog=catalog,
+                    max_candidates=self._config.max_llm_candidates,
+                    conversation_id=conversation_id,
+                    context=context,
+                    origin_area=effective_area,
+                    origin_super_area=effective_super_area,
+                    preserve_raw_text=False,
+                )
+                if not (translation.valid and translation.canonical_text):
+                    return None
+                if translation.resolved_commands:
+                    resolved = translation.resolved_commands[0]
+                else:
+                    resolved = ResolvedLocalCommand(
+                        canonical_text=translation.canonical_text,
+                        action=action,
+                        target_name=None,
+                        tool_group=translation.tool_group,
+                        area=self._infer_area_from_command_text(translation.canonical_text, catalog),
+                        super_area=self._infer_super_area_from_command_text(
+                            translation.canonical_text,
+                            catalog,
+                        ),
+                        source=translation.source,
+                    )
+
+            resolved_commands.append(resolved)
+            debug_segments.append(
+                {
+                    "input": segment_text,
+                    "action": resolved.action,
+                    "explicit_action": explicit_action,
+                    "canonical_text": resolved.canonical_text,
+                    "target": resolved.target_name,
+                    "area": resolved.area,
+                    "super_area": resolved.super_area,
+                    "tool_group": resolved.tool_group,
+                    "source": resolved.source,
+                }
+            )
+            if resolved.area:
+                effective_area = resolved.area
+            if resolved.super_area:
+                effective_super_area = resolved.super_area
+
+        translation = LLMTranslationResult(
+            mode="translate",
+            canonical_text=" and ".join(command.canonical_text for command in resolved_commands),
+            tool_group="mixed" if len({command.tool_group for command in resolved_commands}) > 1 else resolved_commands[0].tool_group,
+            confidence=0.9,
+            notes="compound_entity_builder_match",
+            valid=True,
+            source="compound_router",
+            intent_family="compound_entity_control",
+            confidence_reason="fully_resolved_compound_segments",
+            debug={"match_engine": "compound_router", "segments": debug_segments},
+            raw_text=None,
+            resolved_commands=resolved_commands,
+        )
+        trace.llm_translation_duration_ms = 0.0
+        trace.llm_translation_summary = {
+            "mode": translation.mode,
+            "tool_group": translation.tool_group,
+            "confidence": translation.confidence,
+            "valid": translation.valid,
+            "notes": translation.notes,
+            "source": translation.source,
+            "intent_family": translation.intent_family,
+            "confidence_reason": translation.confidence_reason,
+            "resolved_commands": [command.canonical_text for command in translation.resolved_commands],
+            "debug": translation.debug,
+        }
+        trace.llm_translation_catalog_match = True
+        trace.llm_translation_tool_group = translation.tool_group
+        trace.chosen_canonical_phrase = translation.canonical_text
+        trace.assist_pipeline_input = ", ".join(
+            command.canonical_text for command in translation.resolved_commands
+        )
+        trace.rendered_from_pattern = False
+        trace.rendered_slots = {}
+
+        translated_outcome = await self._execute_local_translation(
+            translation=translation,
+            language=language,
+            conversation_id=conversation_id,
+            context=context,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=None,
+            trace=trace,
+        )
+        trace.llm_translated_local_executed = True
+        trace.llm_translated_local_outcome = (
+            "success" if translated_outcome.success else "failed"
+        )
+        trace.llm_translated_local_response_text = translated_outcome.response_text
+        trace.llm_translated_local_response_type = translated_outcome.response_type
+        trace.llm_translated_local_error_code = translated_outcome.error_code
+        trace.llm_translated_local_processed_locally = translated_outcome.processed_locally
+        trace.llm_translated_local_conversation_id = translated_outcome.conversation_id
+        trace.llm_translated_local_continue_conversation = (
+            translated_outcome.continue_conversation
+        )
+        if not translated_outcome.success:
+            return None
+
+        self._update_conversation_tracking(
+            conversation_id,
+            translated_outcome,
+            executor="local",
+            agent_id=self._config.local_agent_id,
+        )
+        return RouterResult(
+            path=ResolutionPath.LLM_TRANSLATED_LOCAL,
+            outcome=translated_outcome,
+            trace=trace,
+        )
+
+    def _parse_compound_local_segments(
+        self,
+        utterance: str,
+    ) -> list[tuple[str, str, bool]] | None:
+        normalized = normalize_text(utterance)
+        if " and " not in normalized or not _starts_with_supported_local_action(normalized):
+            return None
+        chunks = [chunk.strip() for chunk in normalized.split(" and ") if chunk.strip()]
+        if len(chunks) < 2:
+            return None
+
+        segments: list[tuple[str, str, bool]] = []
+        current_action: str | None = None
+        for index, chunk in enumerate(chunks):
+            parsed = None
+            for prefix, action in COMPOUND_ACTION_PREFIXES:
+                if chunk == prefix or chunk.startswith(f"{prefix} "):
+                    parsed = (action, chunk.removeprefix(prefix).strip())
+                    break
+            if parsed is None:
+                if current_action is None:
+                    return None
+                action = current_action
+                target_text = self._strip_leading_articles(chunk)
+                explicit_action = False
+            else:
+                action, remainder = parsed
+                current_action = action
+                target_text = self._strip_leading_articles(remainder)
+                explicit_action = True
+
+            if not target_text:
+                return None
+            if index == 0 and not explicit_action:
+                return None
+            segments.append((action, target_text, explicit_action))
+        return segments
+
+    def _compound_segment_text(self, *, action: str, target_text: str) -> str:
+        return f"{CANONICAL_ACTION_TEXT.get(action, action)} {self._strip_leading_articles(target_text)}".strip()
+
+    def _strip_leading_articles(self, text: str) -> str:
+        normalized = normalize_text(text)
+        tokens = normalized.split()
+        while tokens and tokens[0] in {"the", "a", "an"}:
+            tokens.pop(0)
+        return " ".join(tokens)
+
+    def _resolve_compound_segment_via_fuzzy(
+        self,
+        *,
+        text: str,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> ResolvedLocalCommand | None:
+        if not self._config.fuzzy_enabled:
+            return None
+        match_result = self._matcher.match(
+            text,
+            catalog,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if match_result.best is None:
+            return None
+        second = match_result.top_candidates[1].score if len(match_result.top_candidates) > 1 else 0.0
+        decision = validate_fuzzy_execution(
+            inferred_action=match_result.inferred_action,
+            candidate_action=match_result.best.action,
+            canonical_phrase=match_result.best.canonical_phrase,
+            best_score=match_result.best.score,
+            second_score=second,
+            fuzzy_threshold=self._config.fuzzy_threshold,
+            ambiguity_gap=self._config.ambiguity_gap,
+            high_risk_threshold=self._config.high_risk_threshold,
+        )
+        if not decision.allowed:
+            return None
+        assist_input = match_result.best.canonical_phrase
+        area = self._infer_area_from_command_text(assist_input, catalog)
+        super_area = self._infer_super_area_from_command_text(assist_input, catalog)
+        return ResolvedLocalCommand(
+            canonical_text=assist_input,
+            action=match_result.best.action,
+            target_name=match_result.best.target_name,
+            tool_group=None,
+            area=area,
+            super_area=super_area,
+            source="compound_fuzzy_matcher",
+        )
+
+    def _infer_area_from_command_text(self, command_text: str, catalog) -> str | None:
+        normalized = normalize_text(command_text)
+        areas = {
+            normalize_text(entity.area): entity.area
+            for entity in catalog.entity_targets
+            if entity.area
+        }
+        for area_norm, area in sorted(areas.items(), key=lambda item: len(item[0]), reverse=True):
+            if area_norm and area_norm in normalized:
+                return area
+        return None
+
+    def _infer_super_area_from_command_text(self, command_text: str, catalog) -> str | None:
+        normalized = normalize_text(command_text)
+        super_areas = {
+            normalize_text(entity.super_area): entity.super_area
+            for entity in catalog.entity_targets
+            if entity.super_area
+        }
+        for area_norm, area in sorted(super_areas.items(), key=lambda item: len(item[0]), reverse=True):
+            if area_norm and area_norm in normalized:
+                return area
+        return None
+
     async def _execute_local_translation(
         self,
         *,
@@ -1633,20 +2008,42 @@ class AgentRouter:
             )
 
         trace.compound_local_commands = [command.canonical_text for command in commands]
-        outcomes: list[LocalAgentOutcome] = []
-        for command in commands:
-            outcomes.append(
-                await self._agent_adapter.async_process(
-                    agent_id=self._config.local_agent_id,
-                    text=command.canonical_text,
-                    language=language,
-                    conversation_id=conversation_id,
-                    context=context,
-                    device_id=device_id,
-                    satellite_id=satellite_id,
-                    extra_system_prompt=extra_system_prompt,
+        if self._can_parallelize_local_translation(
+            commands,
+            conversation_id=conversation_id,
+        ):
+            outcomes = list(
+                await asyncio.gather(
+                    *[
+                        self._agent_adapter.async_process(
+                            agent_id=self._config.local_agent_id,
+                            text=command.canonical_text,
+                            language=language,
+                            conversation_id=conversation_id,
+                            context=context,
+                            device_id=device_id,
+                            satellite_id=satellite_id,
+                            extra_system_prompt=extra_system_prompt,
+                        )
+                        for command in commands
+                    ]
                 )
             )
+        else:
+            outcomes: list[LocalAgentOutcome] = []
+            for command in commands:
+                outcomes.append(
+                    await self._agent_adapter.async_process(
+                        agent_id=self._config.local_agent_id,
+                        text=command.canonical_text,
+                        language=language,
+                        conversation_id=conversation_id,
+                        context=context,
+                        device_id=device_id,
+                        satellite_id=satellite_id,
+                        extra_system_prompt=extra_system_prompt,
+                    )
+                )
 
         trace.compound_local_outcomes = [
             {
@@ -1697,6 +2094,21 @@ class AgentRouter:
             conversation_id=last_success.conversation_id,
             continue_conversation=last_success.continue_conversation,
         )
+
+    def _can_parallelize_local_translation(
+        self,
+        commands: list[ResolvedLocalCommand],
+        *,
+        conversation_id: str | None,
+    ) -> bool:
+        """Parallelize only clearly independent compound device actions."""
+        if conversation_id is not None:
+            return False
+        actions = {command.action for command in commands}
+        if len(actions) != 1:
+            return False
+        action = next(iter(actions))
+        return action in {"turn_on", "turn_off", "open", "close", "lock", "unlock"}
 
     def _build_llm_state_enrichment(
         self,

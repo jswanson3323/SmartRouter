@@ -27,6 +27,11 @@ from .models import (
 )
 from .phrase_renderer import render_conversation_pattern
 from .phonetics import normalize_text, tokenize
+from .semantic_intent import (
+    REQUEST_GENERAL_BYPASS_THRESHOLD,
+    REQUEST_TOOL_HINT_THRESHOLD,
+    SemanticRequestClassification,
+)
 from .safety import validate_fuzzy_execution
 
 _LOGGER = logging.getLogger(__name__)
@@ -317,10 +322,34 @@ class AgentRouter:
             )
             if action_result is not None:
                 trace.local_action_intercepted_during_llm = True
+                self._update_conversation_tracking(
+                    conversation_id,
+                    action_result.outcome,
+                    executor="local",
+                    agent_id=self._config.local_agent_id,
+                )
                 trace.selected_path = action_result.path
                 trace.final_executor = "local"
                 trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
                 return action_result
+            local_intent_result = await self._try_local_intent_during_llm(
+                text=text,
+                language=language,
+                conversation_id=conversation_id,
+                context=context,
+                trace=trace,
+                catalog=catalog,
+                origin_area=resolved_origin_area,
+                origin_super_area=resolved_origin_super_area,
+                device_id=device_id,
+                satellite_id=satellite_id,
+                extra_system_prompt=extra_system_prompt,
+            )
+            if local_intent_result is not None:
+                trace.selected_path = local_intent_result.path
+                trace.final_executor = "local"
+                trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+                return local_intent_result
             trace.assist_pipeline_input = text
             trace.rendered_from_pattern = False
             trace.rendered_slots = {}
@@ -647,10 +676,46 @@ class AgentRouter:
             _LOGGER.debug("Fuzzy candidate rejected before execution: unknown local action")
 
         # 2) LLM translation to local
-        direct_llm_only = self._should_bypass_local_pipeline_for_llm(
-            text=text,
+        semantic_request_classification = await self._llm_adapter.async_classify_request(
+            utterance=text,
             catalog=catalog,
         )
+        trace.semantic_request_classification_available = (
+            semantic_request_classification is not None
+        )
+        if semantic_request_classification is not None:
+            trace.semantic_request_classification_kind = (
+                semantic_request_classification.kind
+            )
+            trace.semantic_request_classification_confidence = round(
+                semantic_request_classification.confidence,
+                4,
+            )
+            trace.semantic_request_classification_intent_family = (
+                semantic_request_classification.intent_family
+            )
+            trace.semantic_request_classification_reason = (
+                semantic_request_classification.reason
+            )
+            trace.semantic_request_classification_debug = (
+                semantic_request_classification.debug
+            )
+            direct_llm_only = bool(
+                semantic_request_classification.kind == "general_request"
+                and semantic_request_classification.confidence
+                >= REQUEST_GENERAL_BYPASS_THRESHOLD
+            )
+            trace.semantic_request_routing_source = (
+                "semantic_classifier" if direct_llm_only else "semantic_classifier_advisory"
+            )
+        else:
+            direct_llm_only = self._should_bypass_local_pipeline_for_llm(
+                text=text,
+                catalog=catalog,
+            )
+            trace.semantic_request_routing_source = (
+                "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
+            )
         should_run_llm_translation = (
             self._config.llm_translate_enabled
             and selected_path is None
@@ -667,10 +732,19 @@ class AgentRouter:
                 "notes": (
                     "skipped_due_to_fuzzy_match"
                     if selected_path == ResolutionPath.FUZZY_LOCAL
+                    else "semantic_general_request_bypass"
+                    if direct_llm_only
+                    and trace.semantic_request_routing_source == "semantic_classifier"
                     else "direct_llm_only"
                     if direct_llm_only
                     else "skipped"
                 ),
+                "debug": {
+                    "semantic_request_routing_source": trace.semantic_request_routing_source,
+                    "semantic_request_classification_kind": trace.semantic_request_classification_kind,
+                    "semantic_request_classification_confidence": trace.semantic_request_classification_confidence,
+                    "semantic_request_classification_intent_family": trace.semantic_request_classification_intent_family,
+                },
             }
             trace.llm_translated_local_executed = False
         if should_run_llm_translation:
@@ -859,6 +933,7 @@ class AgentRouter:
                     origin_area=resolved_origin_area,
                     origin_super_area=resolved_origin_super_area,
                     extra_system_prompt=extra_system_prompt,
+                    semantic_request_classification=semantic_request_classification,
                 )
                 fallback_conversation_id = self._resolve_initial_llm_fallback_conversation_id()
                 if allow_streaming_llm_fallback:
@@ -1287,6 +1362,99 @@ class AgentRouter:
             trace=trace,
         )
 
+    async def _try_local_intent_during_llm(
+        self,
+        *,
+        text: str,
+        language: str,
+        conversation_id: str | None,
+        context: Any,
+        trace: ResolutionTrace,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+        device_id: str | None,
+        satellite_id: str | None,
+        extra_system_prompt: str | None,
+    ) -> RouterResult | None:
+        """Allow strong local phrase/entity intent matches to interrupt an active LLM turn."""
+        translation_started = perf_counter()
+        translation = await self._llm_adapter.async_translate_for_local(
+            llm_agent_id=self._config.translate_llm_agent_id,
+            utterance=text,
+            language=language,
+            catalog=catalog,
+            max_candidates=self._config.max_llm_candidates,
+            conversation_id=conversation_id,
+            context=context,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+            preserve_raw_text=False,
+        )
+        trace.llm_translation_duration_ms = round(
+            (perf_counter() - translation_started) * 1000,
+            3,
+        )
+        trace.llm_translation_summary = {
+            "mode": translation.mode,
+            "tool_group": translation.tool_group,
+            "confidence": translation.confidence,
+            "valid": translation.valid,
+            "notes": (
+                "active_llm_local_intent_interrupt"
+                if translation.valid and translation.canonical_text
+                else "active_llm_conversation"
+            ),
+            "source": translation.source,
+            "intent_family": translation.intent_family,
+            "confidence_reason": translation.confidence_reason,
+            "debug": translation.debug,
+        }
+        if not (translation.valid and translation.canonical_text):
+            trace.llm_translated_local_executed = False
+            return None
+
+        trace.chosen_canonical_phrase = translation.canonical_text
+        trace.assist_pipeline_input = translation.canonical_text
+        trace.rendered_from_pattern = False
+        trace.rendered_slots = {}
+        translated_outcome = await self._agent_adapter.async_process(
+            agent_id=self._config.local_agent_id,
+            text=translation.canonical_text,
+            language=language,
+            conversation_id=None,
+            context=context,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=extra_system_prompt,
+        )
+        trace.llm_translated_local_executed = True
+        trace.llm_translated_local_outcome = (
+            "success" if translated_outcome.success else "failed"
+        )
+        trace.llm_translated_local_response_text = translated_outcome.response_text
+        trace.llm_translated_local_response_type = translated_outcome.response_type
+        trace.llm_translated_local_error_code = translated_outcome.error_code
+        trace.llm_translated_local_processed_locally = translated_outcome.processed_locally
+        trace.llm_translated_local_conversation_id = translated_outcome.conversation_id
+        trace.llm_translated_local_continue_conversation = (
+            translated_outcome.continue_conversation
+        )
+        if not translated_outcome.success:
+            return None
+
+        self._update_conversation_tracking(
+            conversation_id,
+            translated_outcome,
+            executor="local",
+            agent_id=self._config.local_agent_id,
+        )
+        return RouterResult(
+            path=ResolutionPath.LLM_TRANSLATED_LOCAL,
+            outcome=translated_outcome,
+            trace=trace,
+        )
+
     def _build_llm_fallback_system_prompt(
         self,
         *,
@@ -1296,9 +1464,14 @@ class AgentRouter:
         origin_area: str | None,
         origin_super_area: str | None,
         extra_system_prompt: str | None,
+        semantic_request_classification: SemanticRequestClassification | None = None,
     ) -> str | None:
         """Build the compact system prompt sent to the fallback LLM."""
         upstream_prompt = extra_system_prompt.strip() if extra_system_prompt else None
+        semantic_hint = self._build_semantic_fallback_hint(
+            classification=semantic_request_classification,
+            trace=trace,
+        )
         state_enrichment = self._build_llm_state_enrichment(
             text=text,
             catalog=catalog,
@@ -1306,16 +1479,26 @@ class AgentRouter:
             origin_super_area=origin_super_area,
         )
 
+        prompt_parts: list[str] = []
+        if semantic_hint:
+            prompt_parts.append(semantic_hint)
+            trace.llm_fallback_prompt_hint_applied = True
+            trace.llm_fallback_prompt_hint = semantic_hint
+        else:
+            trace.llm_fallback_prompt_hint_applied = False
+            trace.llm_fallback_prompt_hint = None
+
         if state_enrichment:
-            fallback_prompt = state_enrichment["prompt"]
+            prompt_parts.append(state_enrichment["prompt"])
             trace.llm_state_enrichment_applied = True
             trace.llm_state_enrichment_targets = state_enrichment["targets"]
-            trace.llm_state_enrichment_prompt = fallback_prompt
+            trace.llm_state_enrichment_prompt = state_enrichment["prompt"]
         else:
-            fallback_prompt = None
             trace.llm_state_enrichment_applied = False
             trace.llm_state_enrichment_targets = []
             trace.llm_state_enrichment_prompt = None
+
+        fallback_prompt = "\n\n".join(prompt_parts) if prompt_parts else None
 
         trace.llm_fallback_upstream_prompt_suppressed = bool(upstream_prompt)
         trace.llm_fallback_upstream_prompt_chars = (
@@ -1323,6 +1506,34 @@ class AgentRouter:
         )
         trace.llm_fallback_prompt_chars = len(fallback_prompt) if fallback_prompt else 0
         return fallback_prompt
+
+    def _build_semantic_fallback_hint(
+        self,
+        *,
+        classification: SemanticRequestClassification | None,
+        trace: ResolutionTrace,
+    ) -> str | None:
+        """Build a short hint for the fallback LLM from semantic request classification."""
+        if classification is None:
+            return None
+        if (
+            classification.kind == "general_request"
+            and classification.confidence >= REQUEST_GENERAL_BYPASS_THRESHOLD
+        ):
+            return (
+                "This appears to be a general/open-domain request. "
+                "Prefer a general assistant answer unless the user explicitly asks for a Home Assistant action."
+            )
+        if (
+            classification.kind == "tool_request"
+            and classification.confidence >= REQUEST_TOOL_HINT_THRESHOLD
+            and trace.selected_path == ResolutionPath.FAILED
+        ):
+            return (
+                "This appears to be a smart-home/tool request that local routing could not fully resolve. "
+                "Prefer a smart-home interpretation if it fits the user's wording."
+            )
+        return None
 
     def _resolve_initial_llm_fallback_conversation_id(self) -> str | None:
         """Start first-turn LLM fallback fresh to avoid replaying outer chat history."""

@@ -26,6 +26,7 @@ app = FastAPI(title="Catalog Router Semantic Service")
 class PhraseTarget(BaseModel):
     target_id: str
     tool_group: str
+    intent_family: str | None = None
     patterns: list[str] = Field(default_factory=list)
 
 
@@ -39,6 +40,7 @@ class CommandDoc(BaseModel):
     action: str
     target_name: str
     tool_group: str
+    intent_family: str | None = None
     synthetic: bool
     singular: bool
     area: str | None = None
@@ -51,6 +53,13 @@ class EntityRequest(BaseModel):
     origin_area: str | None = None
     origin_super_area: str | None = None
     limit: int = 8
+    commands: list[CommandDoc] = Field(default_factory=list)
+
+
+class ClassificationRequest(BaseModel):
+    utterance: str
+    limit: int = 5
+    phrases: list[PhraseTarget] = Field(default_factory=list)
     commands: list[CommandDoc] = Field(default_factory=list)
 
 
@@ -140,6 +149,102 @@ class SemanticService:
             : request.limit
         ]
         return {"candidates": candidates}
+
+    def classify_request(self, request: ClassificationRequest) -> dict[str, Any]:
+        docs: list[tuple[str, str | None, str]] = []
+        for target in request.phrases:
+            for pattern in target.patterns:
+                semantic_text = self._semantic_phrase_text(pattern)
+                if semantic_text:
+                    docs.append(("tool_request", target.intent_family, semantic_text))
+
+        for command in request.commands:
+            if command.semantic_text:
+                docs.append(
+                    (
+                        "tool_request",
+                        command.intent_family,
+                        self._normalize_text(command.semantic_text),
+                    )
+                )
+
+        for family, text in (
+            ("general", "how do i boil eggs"),
+            ("general", "explain this concept to me"),
+            ("general", "tell me a joke"),
+            ("general", "summarize this article"),
+            ("general", "write an email for me"),
+            ("general", "what does this mean"),
+            ("general", "help me brainstorm ideas"),
+            ("general", "who is the president"),
+        ):
+            docs.append(("general_request", family, text))
+
+        ranked = self._rank(self._semantic_phrase_text(request.utterance), [doc[2] for doc in docs])
+        if not ranked:
+            return {
+                "kind": "general_request",
+                "confidence": 0.0,
+                "intent_family": "general",
+                "reason": None,
+                "debug": {"top_candidates": []},
+            }
+
+        best_tool_score = 0.0
+        best_tool_family: str | None = None
+        best_tool_text: str | None = None
+        best_general_score = 0.0
+        best_general_family: str | None = None
+        best_general_text: str | None = None
+        debug_candidates: list[dict[str, Any]] = []
+        for idx, score in ranked:
+            kind, family, text = docs[idx]
+            if len(debug_candidates) < request.limit:
+                debug_candidates.append(
+                    {
+                        "kind": kind,
+                        "intent_family": family,
+                        "text": text,
+                        "score": round(score, 4),
+                    }
+                )
+            if kind == "tool_request" and score > best_tool_score:
+                best_tool_score = score
+                best_tool_family = family
+                best_tool_text = text
+            elif kind == "general_request" and score > best_general_score:
+                best_general_score = score
+                best_general_family = family
+                best_general_text = text
+
+        if best_general_score >= best_tool_score:
+            kind = "general_request"
+            winning_score = best_general_score
+            losing_score = best_tool_score
+            intent_family = best_general_family or "general"
+            reason = best_general_text
+        else:
+            kind = "tool_request"
+            winning_score = best_tool_score
+            losing_score = best_general_score
+            intent_family = best_tool_family
+            reason = best_tool_text
+
+        confidence = max(
+            0.0,
+            min(1.0, winning_score + (0.5 * max(0.0, winning_score - losing_score))),
+        )
+        return {
+            "kind": kind,
+            "confidence": confidence,
+            "intent_family": intent_family,
+            "reason": reason,
+            "debug": {
+                "tool_score": round(best_tool_score, 4),
+                "general_score": round(best_general_score, 4),
+                "top_candidates": debug_candidates,
+            },
+        }
 
     def _rank(self, utterance: str, docs: list[str]) -> list[tuple[int, float]]:
         if not utterance or not docs:
@@ -263,6 +368,11 @@ def rank_phrase(request: PhraseRequest) -> dict[str, Any]:
 @app.post("/rank/entity")
 def rank_entity(request: EntityRequest) -> dict[str, Any]:
     return SERVICE.rank_entity(request)
+
+
+@app.post("/classify/request")
+def classify_request(request: ClassificationRequest) -> dict[str, Any]:
+    return SERVICE.classify_request(request)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,18 @@ PHRASE_FILTER_THRESHOLD = 0.74
 PHRASE_DIRECT_THRESHOLD = 0.84
 ENTITY_DIRECT_THRESHOLD = 0.82
 ENTITY_AMBIGUITY_GAP = 0.025
+REQUEST_GENERAL_BYPASS_THRESHOLD = 0.84
+REQUEST_TOOL_HINT_THRESHOLD = 0.72
+GENERAL_EXEMPLARS: tuple[tuple[str, str], ...] = (
+    ("general", "how do i boil eggs"),
+    ("general", "explain this concept to me"),
+    ("general", "tell me a joke"),
+    ("general", "summarize this article"),
+    ("general", "write an email for me"),
+    ("general", "what does this mean"),
+    ("general", "help me brainstorm ideas"),
+    ("general", "who is the president"),
+)
 
 
 @dataclass(slots=True)
@@ -43,6 +55,17 @@ class SemanticEntityCandidate:
     score: float
     synthetic: bool
     singular: bool
+
+
+@dataclass(slots=True)
+class SemanticRequestClassification:
+    """Top-level semantic request classification."""
+
+    kind: str
+    confidence: float
+    intent_family: str | None
+    reason: str | None = None
+    debug: dict[str, Any] | None = None
 
 
 class SemanticIntentRanker:
@@ -155,6 +178,104 @@ class SemanticIntentRanker:
                 deduped[key] = candidate
         return sorted(deduped.values(), key=lambda item: item.score, reverse=True)[:limit]
 
+    def classify_request(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+        command_docs: list[dict[str, Any]],
+        infer_tool_group: Any,
+        limit: int = 5,
+    ) -> SemanticRequestClassification | None:
+        docs: list[tuple[str, str | None, str]] = []
+        for target in catalog.conversation_targets:
+            tool_group = infer_tool_group(target.canonical_phrase)
+            intent_family = infer_phrase_intent_family(
+                target.canonical_phrase,
+                tool_group=tool_group,
+            )
+            for pattern in self._conversation_target_patterns(target):
+                semantic_text = self._semantic_phrase_text(pattern)
+                if semantic_text:
+                    docs.append(("tool_request", intent_family, semantic_text))
+
+        for doc in command_docs:
+            semantic_text = str(doc.get("semantic_text") or "").strip()
+            if semantic_text:
+                docs.append(
+                    (
+                        "tool_request",
+                        str(doc.get("intent_family") or infer_command_intent_family(doc.get("action"))),
+                        semantic_text,
+                    )
+                )
+
+        for family, text in GENERAL_EXEMPLARS:
+            docs.append(("general_request", family, text))
+
+        ranked = self._rank(
+            utterance=self._semantic_phrase_text(utterance),
+            docs=[doc_text for _, _, doc_text in docs],
+        )
+        if not ranked:
+            return None
+
+        best_tool_score = 0.0
+        best_tool_family: str | None = None
+        best_tool_text: str | None = None
+        best_general_score = 0.0
+        best_general_family: str | None = None
+        best_general_text: str | None = None
+        debug_candidates: list[dict[str, Any]] = []
+        for idx, score in ranked:
+            kind, family, text = docs[idx]
+            if len(debug_candidates) < limit:
+                debug_candidates.append(
+                    {
+                        "kind": kind,
+                        "intent_family": family,
+                        "text": text,
+                        "score": round(score, 4),
+                    }
+                )
+            if kind == "tool_request" and score > best_tool_score:
+                best_tool_score = score
+                best_tool_family = family
+                best_tool_text = text
+            elif kind == "general_request" and score > best_general_score:
+                best_general_score = score
+                best_general_family = family
+                best_general_text = text
+
+        if best_general_score >= best_tool_score:
+            kind = "general_request"
+            winning_score = best_general_score
+            losing_score = best_tool_score
+            intent_family = best_general_family or "general"
+            winner_text = best_general_text
+        else:
+            kind = "tool_request"
+            winning_score = best_tool_score
+            losing_score = best_general_score
+            intent_family = best_tool_family
+            winner_text = best_tool_text
+
+        confidence = max(
+            0.0,
+            min(1.0, winning_score + (0.5 * max(0.0, winning_score - losing_score))),
+        )
+        return SemanticRequestClassification(
+            kind=kind,
+            confidence=confidence,
+            intent_family=intent_family,
+            reason=winner_text,
+            debug={
+                "top_candidates": debug_candidates,
+                "tool_score": round(best_tool_score, 4),
+                "general_score": round(best_general_score, 4),
+            },
+        )
+
     def _rank(self, *, utterance: str, docs: list[str]) -> list[tuple[int, float]]:
         embedder = self._get_embedder()
         if embedder is None or not utterance or not docs:
@@ -253,3 +374,24 @@ class SemanticIntentRanker:
         if singular and any(token in tokens for token in {"fans", "lights", "lamps", "timers", "alarms", "reminders"}):
             return -0.02
         return 0.0
+
+
+def infer_command_intent_family(action: Any) -> str:
+    """Infer a coarse family for an entity command."""
+    if str(action) == "query":
+        return "entity_query"
+    return "entity_control"
+
+
+def infer_phrase_intent_family(text: str, *, tool_group: str | None = None) -> str:
+    """Infer a coarse phrase family for classification/debugging."""
+    normalized = normalize_text(text)
+    if tool_group == "timers" or any(token in normalized for token in ("timer", "alarm", "reminder")):
+        return "timer"
+    if any(token in normalized for token in ("forecast", "weather")):
+        return "weather"
+    if any(token in normalized for token in ("camera", "cam", "feed", "view")):
+        return "camera"
+    if any(token in normalized for token in ("spa", "hot tub", "pool lights", "lights on", "lights off")):
+        return "entity_control"
+    return tool_group or "conversation_phrase"

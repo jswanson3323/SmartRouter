@@ -260,6 +260,15 @@ class ResolutionTrace:
     rendered_from_pattern: bool | None = None
     rendered_slots: dict[str, str] | None = None
     llm_translation_summary: dict[str, Any] | None = None
+    semantic_request_classification_available: bool | None = None
+    semantic_request_classification_kind: str | None = None
+    semantic_request_classification_confidence: float | None = None
+    semantic_request_classification_intent_family: str | None = None
+    semantic_request_classification_reason: str | None = None
+    semantic_request_classification_debug: dict[str, Any] | None = None
+    semantic_request_routing_source: str | None = None
+    llm_fallback_prompt_hint_applied: bool | None = None
+    llm_fallback_prompt_hint: str | None = None
     final_executor: str | None = None
     catalog_revision: str | None = None
     started_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())

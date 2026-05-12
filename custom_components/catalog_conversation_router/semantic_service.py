@@ -10,7 +10,13 @@ from typing import Any
 
 from .models import Catalog
 from .phonetics import normalize_text
-from .semantic_intent import SemanticEntityCandidate, SemanticPhraseCandidate
+from .semantic_intent import (
+    SemanticEntityCandidate,
+    SemanticPhraseCandidate,
+    SemanticRequestClassification,
+    infer_command_intent_family,
+    infer_phrase_intent_family,
+)
 
 
 class RemoteSemanticIntentRanker:
@@ -97,6 +103,55 @@ class RemoteSemanticIntentRanker:
             )
             for item in data.get("candidates", [])
         ]
+
+    def classify_request(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+        command_docs: list[dict[str, Any]],
+        infer_tool_group: Any,
+        limit: int = 5,
+    ) -> SemanticRequestClassification | None:
+        payload = {
+            "utterance": utterance,
+            "limit": limit,
+            "phrases": [
+                {
+                    "target_id": target.target_id,
+                    "tool_group": infer_tool_group(target.canonical_phrase),
+                    "intent_family": infer_phrase_intent_family(
+                        target.canonical_phrase,
+                        tool_group=infer_tool_group(target.canonical_phrase),
+                    ),
+                    "patterns": [
+                        phrase
+                        for phrase in [target.canonical_phrase, *target.sample_phrases]
+                        if phrase
+                    ],
+                }
+                for target in catalog.conversation_targets
+            ],
+            "commands": [
+                {
+                    **doc,
+                    "intent_family": str(
+                        doc.get("intent_family") or infer_command_intent_family(doc.get("action"))
+                    ),
+                }
+                for doc in command_docs
+            ],
+        }
+        data = self._post_json("/classify/request", payload)
+        if data is None:
+            return None
+        return SemanticRequestClassification(
+            kind=str(data.get("kind") or "general_request"),
+            confidence=float(data.get("confidence") or 0.0),
+            intent_family=str(data["intent_family"]) if data.get("intent_family") is not None else None,
+            reason=str(data["reason"]) if data.get("reason") is not None else None,
+            debug=data.get("debug") if isinstance(data.get("debug"), dict) else None,
+        )
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         url = f"{self._service_url}{path}"

@@ -18,6 +18,8 @@ from .semantic_intent import (
     SemanticEntityCandidate,
     SemanticIntentRanker,
     SemanticPhraseCandidate,
+    SemanticRequestClassification,
+    infer_command_intent_family,
 )
 
 SLOT_RE = re.compile(r"\{([^}]+)\}")
@@ -276,6 +278,22 @@ class LocalIntentResolver:
                 ),
             },
             raw_text=None,
+        )
+
+    def classify_request(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+    ) -> SemanticRequestClassification | None:
+        """Classify whether a request is tool-oriented or open-domain."""
+        if not self._semantic_ranker.available():
+            return None
+        return self._semantic_ranker.classify_request(
+            utterance=utterance,
+            catalog=catalog,
+            command_docs=self._semantic_entity_command_docs(self._build_targets(catalog)),
+            infer_tool_group=self._infer_tool_group_from_phrase,
         )
 
     def _import_hassil(self) -> Any | None:
@@ -915,6 +933,7 @@ class LocalIntentResolver:
                             "action": action,
                             "target_name": target.normalized_name,
                             "tool_group": target.tool_group,
+                            "intent_family": infer_command_intent_family(action),
                             "synthetic": target.synthetic,
                             "singular": not target.synthetic and not target.normalized_name.endswith("s"),
                             "area": target.area,

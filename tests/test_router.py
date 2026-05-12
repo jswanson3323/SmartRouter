@@ -61,11 +61,17 @@ class _FakeAgentAdapter:
 
 
 class _FakeLLMAdapter:
-    def __init__(self, translation, fallback_outcome):
+    def __init__(self, translation, fallback_outcome, classification=None):
         self._translation = translation
         self._fallback_outcome = fallback_outcome
+        self._classification = classification
+        self.classify_calls = []
         self.translate_calls = []
         self.fallback_calls = []
+
+    async def async_classify_request(self, **kwargs):
+        self.classify_calls.append(kwargs)
+        return self._classification
 
     async def async_translate_for_local(self, **kwargs):
         self.translate_calls.append(kwargs)
@@ -114,7 +120,20 @@ class _Translation:
         self.confidence = 0.9
         self.notes = notes
         self.valid = valid
+        self.source = None
+        self.intent_family = None
+        self.confidence_reason = None
+        self.debug = None
         self.raw_text = None
+
+
+class _Classification:
+    def __init__(self, kind, confidence, *, intent_family=None, reason=None, debug=None):
+        self.kind = kind
+        self.confidence = confidence
+        self.intent_family = intent_family
+        self.reason = reason
+        self.debug = debug or {}
 
 
 def _config() -> RouterConfig:
@@ -570,6 +589,58 @@ def test_active_llm_conversation_bypasses_fuzzy_and_returns_to_llm() -> None:
     assert second.trace.llm_translation_summary is not None
     assert second.trace.llm_translation_summary["notes"] == "active_llm_conversation"
     assert second.trace.downstream_conversation_id == "downstream-conv-1"
+
+
+def test_active_llm_conversation_allows_local_phrase_interrupt_and_clears_llm_thread() -> None:
+    matcher = _FakeMatcher(_MatchResult())
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _conversation_result_outcome(True, "What would you like to do?", continue_conversation=True),
+    )
+    agent_adapter = _FakeAgentAdapter([_outcome(False), _outcome(True, text="Good night!")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=matcher,
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    first = asyncio.run(
+        router.async_route(
+            text="i didn't understand",
+            language="en",
+            conversation_id="outer-goodnight-1",
+            context=None,
+        )
+    )
+    assert first.path.value == "llm_fallback"
+
+    llm_adapter._translation = _Translation(
+        True,
+        "goodnight",
+        mode="translate",
+        tool_group="mixed",
+        notes="phrase_match",
+    )
+    second = asyncio.run(
+        router.async_route(
+            text="goodnight",
+            language="en",
+            conversation_id="outer-goodnight-1",
+            context=None,
+        )
+    )
+
+    assert second.path.value == "llm_translated_local"
+    assert second.trace.llm_translation_summary is not None
+    assert second.trace.llm_translation_summary["notes"] == "active_llm_local_intent_interrupt"
+    assert second.trace.chosen_canonical_phrase == "goodnight"
+    assert llm_adapter.fallback_calls[-1]["conversation_id"] == "downstream-conv-1"
+    assert len(llm_adapter.fallback_calls) == 1
+    assert len(llm_adapter.translate_calls) == 1
+    assert "outer-goodnight-1" not in router._active_conversations
 
 
 def test_active_llm_conversation_adds_targeted_state_enrichment() -> None:
@@ -1172,6 +1243,8 @@ def test_open_domain_request_skips_translation_and_exact_local() -> None:
     assert agent_adapter.calls == []
     assert result.trace.llm_translation_summary is not None
     assert result.trace.llm_translation_summary["notes"] == "direct_llm_only"
+    assert result.trace.semantic_request_routing_source == "heuristic_bypass"
+    assert result.trace.semantic_request_classification_available is False
 
 
 def test_open_domain_request_returns_streaming_fallback_request() -> None:
@@ -1210,3 +1283,85 @@ def test_open_domain_request_returns_streaming_fallback_request() -> None:
     assert result.trace.llm_fallback_upstream_prompt_chars == len("streaming upstream prompt")
     assert result.trace.llm_fallback_prompt_chars == 0
     assert result.trace.route_duration_ms is not None
+
+
+def test_semantic_general_request_bypasses_local_translation_and_hints_fallback() -> None:
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _outcome(True, text="boil eggs like this"),
+        classification=_Classification(
+            "general_request",
+            0.93,
+            intent_family="general",
+            reason="how do i boil eggs",
+        ),
+    )
+    agent_adapter = _FakeAgentAdapter([])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="how do i boil eggs?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert llm_adapter.translate_calls == []
+    assert len(llm_adapter.fallback_calls) == 1
+    prompt = llm_adapter.fallback_calls[0]["extra_system_prompt"]
+    assert prompt is not None
+    assert "general/open-domain request" in prompt
+    assert result.trace.llm_translation_summary["notes"] == "semantic_general_request_bypass"
+    assert result.trace.semantic_request_routing_source == "semantic_classifier"
+    assert result.trace.semantic_request_classification_kind == "general_request"
+    assert result.trace.llm_fallback_prompt_hint_applied is True
+
+
+def test_semantic_tool_request_adds_fallback_hint_after_local_miss() -> None:
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _outcome(True, text="The office lights are off."),
+        classification=_Classification(
+            "tool_request",
+            0.83,
+            intent_family="entity_control",
+            reason="turn off office lights",
+        ),
+    )
+    agent_adapter = _FakeAgentAdapter([_outcome(False, text="no exact match")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="kill the lights",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert len(llm_adapter.translate_calls) == 1
+    assert len(llm_adapter.fallback_calls) == 1
+    prompt = llm_adapter.fallback_calls[0]["extra_system_prompt"]
+    assert prompt is not None
+    assert "smart-home/tool request" in prompt
+    assert result.trace.semantic_request_classification_kind == "tool_request"
+    assert result.trace.llm_fallback_prompt_hint_applied is True

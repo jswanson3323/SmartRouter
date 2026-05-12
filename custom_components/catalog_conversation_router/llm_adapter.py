@@ -12,6 +12,7 @@ from typing import Any
 from .local_intent import LocalIntentResolver
 from .models import Catalog, LLMTranslationResult
 from .phonetics import normalize_text, tokenize
+from .semantic_intent import SemanticIntentRanker, SemanticRequestClassification
 from .semantic_service import RemoteSemanticIntentRanker
 
 _LOGGER = logging.getLogger(__name__)
@@ -126,9 +127,29 @@ class LLMAdapter:
         semantic_ranker = (
             RemoteSemanticIntentRanker(semantic_service_url)
             if semantic_service_url.strip()
-            else None
+            else SemanticIntentRanker()
         )
+        self._semantic_ranker = semantic_ranker
         self._local_intent_resolver = LocalIntentResolver(semantic_ranker=semantic_ranker)
+
+    async def async_classify_request(
+        self,
+        *,
+        utterance: str,
+        catalog: Catalog,
+    ) -> SemanticRequestClassification | None:
+        """Classify whether an utterance is tool-oriented or general/open-domain."""
+        if not getattr(self._semantic_ranker, "available", lambda: False)():
+            return None
+        classify = partial(
+            self._local_intent_resolver.classify_request,
+            utterance=utterance,
+            catalog=catalog,
+        )
+        hass = getattr(self._agent_adapter, "hass", None)
+        if hass is not None and hasattr(hass, "async_add_executor_job"):
+            return await hass.async_add_executor_job(classify)
+        return classify()
 
     async def async_translate_for_local(
         self,

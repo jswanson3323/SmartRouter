@@ -137,6 +137,12 @@ def _looks_like_unknown_local_control_request(text: str) -> bool:
     return tokens[0] in CONTROL_LIKE_VERB_TOKENS
 
 
+def _looks_like_compound_local_control_request(text: str) -> bool:
+    """Detect structured multi-target local control utterances joined by `and`."""
+    normalized = normalize_text(text)
+    return _starts_with_supported_local_action(normalized) and " and " in normalized
+
+
 MAX_ACTIVE_CONVERSATIONS = 256
 OPEN_DOMAIN_PREFIXES = (
     "how do i",
@@ -502,9 +508,15 @@ class AgentRouter:
         trace.effective_area_hint = match_result.effective_area_hint
         trace.effective_super_area_hint = match_result.effective_super_area_hint
         unknown_local_control_request = _looks_like_unknown_local_control_request(text)
+        compound_local_control_request = _looks_like_compound_local_control_request(text)
 
         # 1) fuzzy attempt
-        if self._config.fuzzy_enabled and match_result.best is not None and not unknown_local_control_request:
+        if (
+            self._config.fuzzy_enabled
+            and match_result.best is not None
+            and not unknown_local_control_request
+            and not compound_local_control_request
+        ):
             trace.top_fuzzy_candidates = [
                 {
                     "candidate_id": c.candidate_id,
@@ -676,6 +688,16 @@ class AgentRouter:
                 "ambiguity_gap": self._config.ambiguity_gap,
             }
             _LOGGER.debug("Fuzzy candidate rejected before execution: unknown local action")
+        elif compound_local_control_request:
+            trace.fuzzy_decision = {
+                "allowed": False,
+                "reason": "compound_local_control_request",
+                "risk_tier": "low",
+                "best_score": getattr(match_result.best, "score", 0.0),
+                "threshold": self._config.fuzzy_threshold,
+                "ambiguity_gap": self._config.ambiguity_gap,
+            }
+            _LOGGER.debug("Fuzzy candidate rejected before execution: compound local control request")
 
         # 2) LLM translation to local
         semantic_request_classification = await self._llm_adapter.async_classify_request(
@@ -1296,6 +1318,10 @@ class AgentRouter:
         normalized = normalize_text(text)
         unknown_local_control_request = _looks_like_unknown_local_control_request(normalized)
         if unknown_local_control_request:
+            trace.local_action_detected = False
+            return None
+
+        if _looks_like_compound_local_control_request(normalized):
             trace.local_action_detected = False
             return None
 

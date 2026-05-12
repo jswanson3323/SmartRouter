@@ -426,6 +426,52 @@ def test_llm_translated_local_executes_compound_commands_in_order() -> None:
     assert result.trace.compound_local_partial_success is False
 
 
+def test_compound_local_control_skips_fuzzy_and_uses_origin_area_translation() -> None:
+    best = _Candidate("turn on office drum light", score=0.91)
+    match = _MatchResult(best=best, top=[best])
+    translation = _Translation(
+        True,
+        "turn on office fan and turn on office drum light",
+        mode="translate",
+        tool_group="mixed",
+        notes="compound_entity_builder_match",
+        resolved_commands=[
+            ResolvedLocalCommand(canonical_text="turn on office fan"),
+            ResolvedLocalCommand(canonical_text="turn on office drum light"),
+        ],
+    )
+    agent_adapter = _FakeAgentAdapter([_outcome(True, "Fan on"), _outcome(True, "Drum light on")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=agent_adapter,
+        llm_adapter=_FakeLLMAdapter(translation, _outcome(True)),
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the fan and drum light",
+            language="en",
+            conversation_id=None,
+            context=None,
+            origin_area="Office",
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert [call["text"] for call in agent_adapter.calls] == [
+        "turn on office fan",
+        "turn on office drum light",
+    ]
+    assert result.trace.fuzzy_decision["reason"] == "compound_local_control_request"
+    assert result.trace.llm_translation_summary["resolved_commands"] == [
+        "turn on office fan",
+        "turn on office drum light",
+    ]
+
+
 def test_llm_translated_local_reports_partial_success_for_compound_commands() -> None:
     match = _MatchResult(best=None, top=[])
     translation = _Translation(

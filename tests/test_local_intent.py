@@ -658,6 +658,110 @@ def test_semantic_entity_match_uses_origin_area_to_break_plural_tie() -> None:
     assert result.canonical_text == "turn off office lights"
 
 
+def test_semantic_entity_match_prefers_query_when_query_and_control_are_semantically_close() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r8",
+            last_refreshed="now",
+            language="en",
+            entity_count=1,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.kitchen_main",
+                "Kitchen Lights",
+                domain="light",
+                area="Kitchen",
+                capabilities=["turn_on", "turn_off", "set", "query"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    ranker = _FakeSemanticRanker(
+        entity=[
+            SemanticEntityCandidate(
+                action="turn_on",
+                target_name="kitchen lights",
+                tool_group="lighting",
+                score=0.91,
+                synthetic=True,
+                singular=False,
+            ),
+            SemanticEntityCandidate(
+                action="query",
+                target_name="kitchen lights",
+                tool_group="lighting",
+                score=0.88,
+                synthetic=True,
+                singular=False,
+            ),
+        ]
+    )
+
+    result = LocalIntentResolver(semantic_ranker=ranker).resolve(
+        utterance="Can you tell me what is going on in the kitchen?",
+        catalog=catalog,
+    )
+
+    assert result.valid is True
+    assert result.source == "semantic_entity_matcher"
+    assert result.intent_family == "entity_query"
+    assert result.canonical_text == "what is kitchen lights"
+
+
+def test_semantic_entity_match_keeps_control_when_query_signal_is_not_close() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r9",
+            last_refreshed="now",
+            language="en",
+            entity_count=1,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.kitchen_main",
+                "Kitchen Lights",
+                domain="light",
+                area="Kitchen",
+                capabilities=["turn_on", "turn_off", "set", "query"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    ranker = _FakeSemanticRanker(
+        entity=[
+            SemanticEntityCandidate(
+                action="turn_on",
+                target_name="kitchen lights",
+                tool_group="lighting",
+                score=0.91,
+                synthetic=True,
+                singular=False,
+            ),
+            SemanticEntityCandidate(
+                action="query",
+                target_name="kitchen lights",
+                tool_group="lighting",
+                score=0.74,
+                synthetic=True,
+                singular=False,
+            ),
+        ]
+    )
+
+    result = LocalIntentResolver(semantic_ranker=ranker).resolve(
+        utterance="Do something with the kitchen lights",
+        catalog=catalog,
+    )
+
+    assert result.valid is True
+    assert result.source == "semantic_entity_matcher"
+    assert result.intent_family == "entity_control"
+    assert result.canonical_text == "turn on kitchen lights"
+
+
 def test_semantic_direct_phrase_match_skips_device_control_phrase_noise() -> None:
     catalog = Catalog(
         metadata=CatalogMetadata(

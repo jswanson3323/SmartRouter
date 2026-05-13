@@ -13,6 +13,7 @@ from .phrase_renderer import render_conversation_pattern
 from .semantic_intent import (
     ENTITY_AMBIGUITY_GAP,
     ENTITY_DIRECT_THRESHOLD,
+    ENTITY_FAMILY_AMBIGUITY_GAP,
     PHRASE_DIRECT_THRESHOLD,
     PHRASE_FILTER_THRESHOLD,
     SemanticEntityCandidate,
@@ -80,7 +81,6 @@ NUMBER_WORDS = {
 ENTITY_SKIP_WORDS = ["please", "can you", "would you"]
 PHRASE_SKIP_WORDS = ["please"]
 DEVICE_CONTROL_TOOL_GROUPS = {"lighting", "fan", "climate", "media", "locks", "covers"}
-
 ENTITY_ACTION_RULES: dict[str, dict[str, Any]] = {
     "turn_on": {
         "rule": "(turn on | switch on)",
@@ -934,6 +934,12 @@ class LocalIntentResolver:
         if not resolved_candidates:
             return None
 
+        resolved_candidates = self._prefer_semantic_query_candidate(
+            resolved_candidates=resolved_candidates
+        )
+        if not resolved_candidates:
+            return None
+
         best, matched = resolved_candidates[0]
         second = resolved_candidates[1][0] if len(resolved_candidates) > 1 else None
         if best.score < ENTITY_DIRECT_THRESHOLD:
@@ -977,6 +983,39 @@ class LocalIntentResolver:
             },
             raw_text=None,
         )
+
+    def _prefer_semantic_query_candidate(
+        self,
+        *,
+        resolved_candidates: list[tuple[SemanticEntityCandidate, BuilderTarget]],
+    ) -> list[tuple[SemanticEntityCandidate, BuilderTarget]]:
+        """Prefer query when the semantic model marks the same target as family-ambiguous."""
+        if not resolved_candidates:
+            return resolved_candidates
+
+        best_candidate, best_target = resolved_candidates[0]
+        if best_candidate.action == "query":
+            return resolved_candidates
+
+        query_candidates = [
+            pair
+            for pair in resolved_candidates
+            if pair[0].action == "query"
+            and pair[1].normalized_name == best_target.normalized_name
+            and pair[1].tool_group == best_target.tool_group
+        ]
+        if not query_candidates:
+            return resolved_candidates
+
+        best_query_candidate, _best_query_target = query_candidates[0]
+        if best_query_candidate.score < ENTITY_DIRECT_THRESHOLD:
+            return resolved_candidates
+        if (best_candidate.score - best_query_candidate.score) > ENTITY_FAMILY_AMBIGUITY_GAP:
+            return resolved_candidates
+
+        return [
+            pair for pair in resolved_candidates if pair[0].action == "query"
+        ]
 
     def _prefer_origin_semantic_candidate(
         self,

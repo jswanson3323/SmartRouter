@@ -480,107 +480,65 @@ class AgentRouter:
         semantic_request_classification: SemanticRequestClassification | None = None
         direct_llm_only = False
         compound_pipeline_failed = False
-        if compound_local_control_request:
-            semantic_request_classification = await self._llm_adapter.async_classify_request(
-                utterance=text,
-                catalog=catalog,
+        semantic_request_classification = await self._llm_adapter.async_classify_request(
+            utterance=text,
+            catalog=catalog,
+        )
+        trace.semantic_request_classification_available = (
+            semantic_request_classification is not None
+        )
+        if semantic_request_classification is not None:
+            trace.semantic_request_classification_kind = (
+                semantic_request_classification.kind
             )
-            trace.semantic_request_classification_available = (
-                semantic_request_classification is not None
+            trace.semantic_request_classification_confidence = round(
+                semantic_request_classification.confidence,
+                4,
             )
-            if semantic_request_classification is not None:
-                trace.semantic_request_classification_kind = (
-                    semantic_request_classification.kind
-                )
-                trace.semantic_request_classification_confidence = round(
-                    semantic_request_classification.confidence,
-                    4,
-                )
-                trace.semantic_request_classification_intent_family = (
-                    semantic_request_classification.intent_family
-                )
-                trace.semantic_request_classification_reason = (
-                    semantic_request_classification.reason
-                )
-                trace.semantic_request_classification_debug = (
-                    semantic_request_classification.debug
-                )
-                direct_llm_only = bool(
-                    semantic_request_classification.kind == "general_request"
-                    and semantic_request_classification.confidence
-                    >= REQUEST_GENERAL_BYPASS_THRESHOLD
-                )
-                trace.semantic_request_routing_source = (
-                    "semantic_classifier" if direct_llm_only else "semantic_classifier_advisory"
-                )
-            else:
-                direct_llm_only = self._should_bypass_local_pipeline_for_llm(
-                    text=text,
-                    catalog=catalog,
-                )
-                trace.semantic_request_routing_source = (
-                    "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
-                )
+            trace.semantic_request_classification_intent_family = (
+                semantic_request_classification.intent_family
+            )
+            trace.semantic_request_classification_reason = (
+                semantic_request_classification.reason
+            )
+            trace.semantic_request_classification_debug = (
+                semantic_request_classification.debug
+            )
+            direct_llm_only = bool(
+                semantic_request_classification.kind == "general_request"
+                and semantic_request_classification.confidence
+                >= REQUEST_GENERAL_BYPASS_THRESHOLD
+            )
+            trace.semantic_request_routing_source = (
+                "semantic_classifier" if direct_llm_only else "semantic_classifier_advisory"
+            )
         else:
-            semantic_request_classification = await self._llm_adapter.async_classify_request(
-                utterance=text,
+            direct_llm_only = self._should_bypass_local_pipeline_for_llm(
+                text=text,
                 catalog=catalog,
             )
-            trace.semantic_request_classification_available = (
-                semantic_request_classification is not None
+            trace.semantic_request_routing_source = (
+                "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
             )
-            if semantic_request_classification is not None:
-                trace.semantic_request_classification_kind = (
-                    semantic_request_classification.kind
-                )
-                trace.semantic_request_classification_confidence = round(
-                    semantic_request_classification.confidence,
-                    4,
-                )
-                trace.semantic_request_classification_intent_family = (
-                    semantic_request_classification.intent_family
-                )
-                trace.semantic_request_classification_reason = (
-                    semantic_request_classification.reason
-                )
-                trace.semantic_request_classification_debug = (
-                    semantic_request_classification.debug
-                )
-                direct_llm_only = bool(
-                    semantic_request_classification.kind == "general_request"
-                    and semantic_request_classification.confidence
-                    >= REQUEST_GENERAL_BYPASS_THRESHOLD
-                )
-                trace.semantic_request_routing_source = (
-                    "semantic_classifier" if direct_llm_only else "semantic_classifier_advisory"
-                )
-            else:
-                direct_llm_only = self._should_bypass_local_pipeline_for_llm(
-                    text=text,
-                    catalog=catalog,
-                )
-                trace.semantic_request_routing_source = (
-                    "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
-                )
 
-            if not direct_llm_only:
-                compound_result = await self._try_compound_local_control(
-                    text=text,
-                    language=language,
-                    conversation_id=conversation_id,
-                    context=context,
-                    trace=trace,
-                    catalog=catalog,
-                    origin_area=resolved_origin_area,
-                    origin_super_area=resolved_origin_super_area,
-                    device_id=device_id,
-                    satellite_id=satellite_id,
-                )
-                if compound_result is not None:
-                    trace.selected_path = compound_result.path
-                    trace.final_executor = "local"
-                    trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
-                    return compound_result
+        if compound_local_control_request and not direct_llm_only:
+            compound_result = await self._try_compound_local_control(
+                text=text,
+                language=language,
+                conversation_id=conversation_id,
+                context=context,
+                trace=trace,
+                catalog=catalog,
+                origin_area=resolved_origin_area,
+                origin_super_area=resolved_origin_super_area,
+                device_id=device_id,
+                satellite_id=satellite_id,
+            )
+            if compound_result is not None:
+                trace.selected_path = compound_result.path
+                trace.final_executor = "local"
+                trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+                return compound_result
             compound_pipeline_failed = True
 
         if not direct_llm_only:

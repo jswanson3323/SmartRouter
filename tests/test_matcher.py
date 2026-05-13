@@ -207,6 +207,16 @@ def test_turn_off_break_room_fam_maps_to_great_room_fan() -> None:
     assert result.parsed_target_after_normalization == "break room fan"
 
 
+def test_turn_on_great_room_band_maps_to_great_room_fan() -> None:
+    matcher = FuzzyMatcher(fuzzy_threshold=0.45, ambiguity_gap=0.05)
+    result = matcher.match("turn on the great room band", _room_catalog())
+    assert result.best is not None
+    assert result.best.candidate_id == "fan.great_room_fan"
+    assert result.best.canonical_phrase.lower() == "turn on great room fan"
+    assert result.parsed_target_before_normalization == "great room band"
+    assert result.parsed_target_after_normalization == "great room fan"
+
+
 def test_parsed_target_extraction_great_room_fan() -> None:
     matcher = FuzzyMatcher(fuzzy_threshold=0.45, ambiguity_gap=0.05)
     result = matcher.match("turn on the great room fan", _room_catalog())

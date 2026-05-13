@@ -292,6 +292,32 @@ def test_fuzzy_path_success() -> None:
     assert result.trace.route_duration_ms is not None
 
 
+def test_fuzzy_path_prefers_great_room_fan_for_band() -> None:
+    candidate = _Candidate("turn on great room fan")
+    candidate.candidate_id = "fan.great_room_fan"
+    candidate.target_name = "Great Room Fan"
+    match = _MatchResult(best=candidate, top=[candidate])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(True, "Turned on the fan")]),
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the great room band",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+    assert result.path.value == "fuzzy_local"
+    assert router._agent_adapter.calls[-1]["text"] == "turn on great room fan"
+    assert result.trace.assist_pipeline_input == "turn on great room fan"
+
+
 def test_debug_collection_skips_llm_translation_after_fuzzy_match() -> None:
     match = _MatchResult(best=_Candidate("turn on kitchen light"), top=[_Candidate("turn on kitchen light")])
     router = AgentRouter(
@@ -595,6 +621,7 @@ def test_llm_translated_local_reports_partial_success_for_compound_commands() ->
 
     assert result.path.value == "llm_translated_local"
     assert result.outcome.success is True
+    assert result.outcome.response is None
     assert "Done:" in (result.outcome.response_text or "")
     assert "Failed:" in (result.outcome.response_text or "")
     assert result.trace.compound_local_partial_success is True
@@ -653,6 +680,52 @@ def test_translate_mode_compound_failure_returns_failed_when_all_subcommands_fai
     )
 
     assert result.path.value == "failed"
+    assert result.trace.compound_local_partial_success is False
+
+
+def test_llm_translated_local_compound_success_keeps_suboutcomes_in_raw_only() -> None:
+    match = _MatchResult(best=None, top=[])
+    translation = _Translation(
+        True,
+        "turn on kitchen light and turn on sink light and turn off great room fan",
+        mode="translate",
+        tool_group="mixed",
+        resolved_commands=[
+            ResolvedLocalCommand(canonical_text="turn on kitchen light", action="turn_on"),
+            ResolvedLocalCommand(canonical_text="turn on sink light", action="turn_on"),
+            ResolvedLocalCommand(canonical_text="turn off great room fan", action="turn_off"),
+        ],
+    )
+    agent_adapter = _FakeAgentAdapter(
+        [
+            _outcome(True, "Turned on the light"),
+            _outcome(True, "Turned on the light"),
+            _outcome(True, "Turned off the fan"),
+        ]
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=agent_adapter,
+        llm_adapter=_FakeLLMAdapter(translation, _outcome(True)),
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the kitchen light and the sink light and turn off the break room fan",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert result.outcome.success is True
+    assert result.outcome.response is None
+    assert isinstance(result.outcome.raw, list)
+    assert len(result.outcome.raw) == 3
     assert result.trace.compound_local_partial_success is False
 
 
@@ -1591,6 +1664,9 @@ def test_semantic_general_request_bypasses_local_translation_and_hints_fallback(
     )
 
     assert result.path.value == "llm_fallback"
+    assert router._matcher.calls == []
+    assert agent_adapter.calls == []
+    assert len(llm_adapter.classify_calls) == 1
     assert llm_adapter.translate_calls == []
     assert len(llm_adapter.fallback_calls) == 1
     prompt = llm_adapter.fallback_calls[0]["extra_system_prompt"]

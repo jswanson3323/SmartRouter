@@ -163,7 +163,7 @@ class FuzzyMatcher:
         normalized = normalize_text(utterance)
         parsed = self.parse_utterance(utterance)
         parsed_target_before = normalize_text(parsed.target_phrase or normalized)
-        utter_tokens = self._normalize_asr_target_tokens(parsed_target_before)
+        utter_tokens = self._normalize_asr_target_tokens(parsed_target_before, catalog)
         parsed_target_after = " ".join(utter_tokens)
         utter_phonetic = set(phonetic_tokens(utter_tokens))
         utter_full_tokens = tokenize(normalized)
@@ -1246,28 +1246,68 @@ class FuzzyMatcher:
             or utterance_text == normalize_text(canonical_phrase)
         )
 
-    def _normalize_asr_target_tokens(self, target_phrase: str) -> list[str]:
-        """Normalize likely ASR noun substitutions before scoring."""
+    def _normalize_asr_target_tokens(self, target_phrase: str, catalog: Catalog) -> list[str]:
+        """Normalize likely ASR noun substitutions before scoring.
+
+        This is intentionally conservative: only unknown tokens that are
+        strongly closer to a device/domain vocabulary term get rewritten.
+        """
         tokens = tokenize(target_phrase)
         if not tokens:
             return tokens
 
-        all_domain_terms = sorted(
-            {term for terms in DOMAIN_HINT_MAP.values() for term in terms},
-            key=len,
-            reverse=True,
-        )
+        candidate_terms = self._asr_candidate_terms(catalog)
         corrected: list[str] = []
         for token in tokens:
-            best = token
-            best_ratio = 0.0
-            for term in all_domain_terms:
-                ratio = SequenceMatcher(a=token, b=term).ratio()
-                if ratio > best_ratio:
-                    best_ratio = ratio
-                    best = term
-            corrected.append(best if best_ratio >= 0.84 else token)
+            corrected.append(self._best_asr_token_substitution(token, candidate_terms))
         return corrected
+
+    def _asr_candidate_terms(self, catalog: Catalog) -> list[str]:
+        terms: set[str] = {term for values in DOMAIN_HINT_MAP.values() for term in values}
+        for entity in catalog.entity_targets:
+            terms.update(entity.tokens)
+            terms.update(tokenize(entity.normalized_name))
+            for alias in entity.aliases:
+                terms.update(tokenize(alias))
+        for target in catalog.conversation_targets:
+            terms.update(target.tokens)
+            terms.update(tokenize(target.normalized_name))
+            for alias in target.aliases:
+                terms.update(tokenize(alias))
+        return sorted(term for term in terms if term)
+
+    def _best_asr_token_substitution(self, token: str, candidate_terms: list[str]) -> str:
+        if not token or token in candidate_terms:
+            return token
+
+        best_term = token
+        best_score = 0.0
+        second_score = 0.0
+        for term in candidate_terms:
+            if term == token:
+                return token
+            score = self._asr_token_similarity(token, term)
+            if score > best_score:
+                second_score = best_score
+                best_score = score
+                best_term = term
+            elif score > second_score:
+                second_score = score
+
+        if best_term == token:
+            return token
+
+        if best_score >= 0.74 and (best_score - second_score) >= 0.08:
+            return best_term
+        return token
+
+    def _asr_token_similarity(self, left: str, right: str) -> float:
+        edit_ratio = SequenceMatcher(a=left, b=right).ratio()
+        left_phonetic = phonetic_key(left)
+        right_phonetic = phonetic_key(right)
+        phonetic_ratio = SequenceMatcher(a=left_phonetic, b=right_phonetic).ratio()
+        prefix_bonus = 0.08 if left[:1] == right[:1] else 0.0
+        return min(1.0, (0.55 * edit_ratio) + (0.45 * phonetic_ratio) + prefix_bonus)
 
     def _whole_target_similarity(self, parsed_target: str, candidate_target: str) -> float:
         """Compare full target phrases using edit and phonetic phrase similarity."""

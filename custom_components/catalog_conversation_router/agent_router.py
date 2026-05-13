@@ -41,6 +41,7 @@ from .semantic_intent import (
 from .safety import validate_fuzzy_execution
 
 _LOGGER = logging.getLogger(__name__)
+LLM_FALLBACK_TOOLS_REQUIRED_MARKER = "ROUTER_LLM_FALLBACK_NEEDS_TOOLS=1"
 SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
 STATUS_QUERY_HINTS = (
     "status",
@@ -373,6 +374,30 @@ class AgentRouter:
                 "notes": "active_llm_conversation",
             }
             trace.llm_translated_local_executed = False
+            semantic_request_classification = await self._llm_adapter.async_classify_request(
+                utterance=text,
+                catalog=catalog,
+            )
+            if semantic_request_classification is not None:
+                trace.semantic_request_classification_available = True
+                trace.semantic_request_classification_kind = (
+                    semantic_request_classification.kind
+                )
+                trace.semantic_request_classification_confidence = round(
+                    semantic_request_classification.confidence,
+                    4,
+                )
+                trace.semantic_request_classification_intent_family = (
+                    semantic_request_classification.intent_family
+                )
+                trace.semantic_request_classification_reason = (
+                    semantic_request_classification.reason
+                )
+                trace.semantic_request_classification_debug = (
+                    semantic_request_classification.debug
+                )
+            else:
+                trace.semantic_request_classification_available = False
             llm_system_prompt = self._build_llm_fallback_system_prompt(
                 trace=trace,
                 text=text,
@@ -380,6 +405,7 @@ class AgentRouter:
                 origin_area=resolved_origin_area,
                 origin_super_area=resolved_origin_super_area,
                 extra_system_prompt=extra_system_prompt,
+                semantic_request_classification=semantic_request_classification,
             )
             if self._config.llm_fallback_enabled:
                 if _should_execute_branch():
@@ -1583,6 +1609,8 @@ class AgentRouter:
     ) -> str | None:
         """Build the compact system prompt sent to the fallback LLM."""
         upstream_prompt = extra_system_prompt.strip() if extra_system_prompt else None
+        needs_tools = self._fallback_needs_tools(semantic_request_classification)
+        trace.llm_fallback_needs_tools = needs_tools
         semantic_hint = self._build_semantic_fallback_hint(
             classification=semantic_request_classification,
             trace=trace,
@@ -1595,6 +1623,8 @@ class AgentRouter:
         )
 
         prompt_parts: list[str] = []
+        if needs_tools:
+            prompt_parts.append(LLM_FALLBACK_TOOLS_REQUIRED_MARKER)
         if semantic_hint:
             prompt_parts.append(semantic_hint)
             trace.llm_fallback_prompt_hint_applied = True
@@ -1621,6 +1651,17 @@ class AgentRouter:
         )
         trace.llm_fallback_prompt_chars = len(fallback_prompt) if fallback_prompt else 0
         return fallback_prompt
+
+    def _fallback_needs_tools(
+        self,
+        classification: SemanticRequestClassification | None,
+    ) -> bool:
+        """Return whether fallback should expose downstream tools for this turn."""
+        return bool(
+            classification is not None
+            and classification.kind == "tool_request"
+            and classification.confidence >= REQUEST_TOOL_HINT_THRESHOLD
+        )
 
     def _build_semantic_fallback_hint(
         self,

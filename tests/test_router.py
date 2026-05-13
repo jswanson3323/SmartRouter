@@ -1782,11 +1782,13 @@ def test_semantic_general_request_bypasses_local_translation_and_hints_fallback(
     assert len(llm_adapter.fallback_calls) == 1
     prompt = llm_adapter.fallback_calls[0]["extra_system_prompt"]
     assert prompt is not None
+    assert "ROUTER_LLM_FALLBACK_NEEDS_TOOLS=1" not in prompt
     assert "general/open-domain request" in prompt
     assert result.trace.llm_translation_summary["notes"] == "semantic_general_request_bypass"
     assert result.trace.semantic_request_routing_source == "semantic_classifier"
     assert result.trace.semantic_request_classification_kind == "general_request"
     assert result.trace.llm_fallback_prompt_hint_applied is True
+    assert result.trace.llm_fallback_needs_tools is False
 
 
 def test_semantic_tool_request_adds_fallback_hint_after_local_miss() -> None:
@@ -1824,6 +1826,8 @@ def test_semantic_tool_request_adds_fallback_hint_after_local_miss() -> None:
     assert len(llm_adapter.fallback_calls) == 1
     prompt = llm_adapter.fallback_calls[0]["extra_system_prompt"]
     assert prompt is not None
+    assert "ROUTER_LLM_FALLBACK_NEEDS_TOOLS=1" in prompt
     assert "smart-home/tool request" in prompt
     assert result.trace.semantic_request_classification_kind == "tool_request"
     assert result.trace.llm_fallback_prompt_hint_applied is True
+    assert result.trace.llm_fallback_needs_tools is True

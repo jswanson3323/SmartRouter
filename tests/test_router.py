@@ -899,6 +899,43 @@ def test_translate_mode_disables_final_llm_fallback_when_local_handling_fails() 
     assert result.trace.llm_translation_summary["mode"] == "translate"
 
 
+def test_failed_query_translation_reopens_final_llm_fallback() -> None:
+    match = _MatchResult(best=None, top=[])
+    translation = _Translation(
+        True,
+        "what is kitchen lights",
+        mode="translate",
+        tool_group="lighting",
+    )
+    translation.intent_family = "entity_query"
+    llm_adapter = _FakeLLMAdapter(
+        translation,
+        _outcome(True, "The kitchen lights are on."),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(False), _outcome(False)]),
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="Can you tell me what is going on in the kitchen?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert len(llm_adapter.fallback_calls) == 1
+    assert result.trace.llm_translation_summary["intent_family"] == "entity_query"
+    assert result.trace.llm_translated_local_outcome == "failed"
+
+
 def test_area_scoped_ambiguity_still_executes_locally() -> None:
     best = _Candidate("turn on master bedroom light", score=0.90)
     best.detail = {"area_scoped_domain_resolution": 1.0}

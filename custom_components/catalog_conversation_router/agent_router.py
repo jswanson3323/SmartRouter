@@ -948,6 +948,12 @@ class AgentRouter:
                     executor="local",
                     agent_id=self._config.local_agent_id,
                 )
+                if (
+                    translated_outcome is not None
+                    and not translated_outcome.success
+                    and translation.intent_family == "entity_query"
+                ):
+                    translation_found_good_match = False
 
                 if dry_run or (translated_outcome is not None and translated_outcome.success):
                     _LOGGER.debug("ROUTER DECISION: LLM_TRANSLATED_LOCAL")

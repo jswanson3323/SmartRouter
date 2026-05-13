@@ -836,6 +836,8 @@ def test_compound_same_action_exact_segment_match_beats_entrance_light_ambiguity
         "turn off great room light",
         "turn off great room entrance light",
     ]
+    assert result.trace.llm_translation_summary["debug"]["segments"][1]["source"] == "compound_exact_matcher"
+    assert result.trace.llm_translation_summary["debug"]["segments"][2]["source"] == "compound_exact_matcher"
 
 
 def test_non_translate_classification_is_traced_but_does_not_change_routing() -> None:

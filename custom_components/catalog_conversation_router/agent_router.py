@@ -1974,6 +1974,14 @@ class AgentRouter:
     ) -> ResolvedLocalCommand | None:
         if not self._config.fuzzy_enabled:
             return None
+        exact_match = self._resolve_compound_segment_exact_entity(
+            text=text,
+            catalog=catalog,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if exact_match is not None:
+            return exact_match
         match_result = self._matcher.match(
             text,
             catalog,
@@ -2006,6 +2014,64 @@ class AgentRouter:
             area=area,
             super_area=super_area,
             source="compound_fuzzy_matcher",
+        )
+
+    def _resolve_compound_segment_exact_entity(
+        self,
+        *,
+        text: str,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> ResolvedLocalCommand | None:
+        parsed = self._matcher.parse_utterance(text)
+        action = parsed.action
+        normalized_target = normalize_text(parsed.target_phrase or "")
+        if not normalized_target:
+            return None
+
+        candidates = []
+        for entity in catalog.entity_targets:
+            if entity.capabilities and action and action not in entity.capabilities:
+                continue
+            alias_matches = any(normalize_text(alias) == normalized_target for alias in entity.aliases)
+            if entity.normalized_name == normalized_target or alias_matches:
+                candidates.append(entity)
+
+        if not candidates:
+            return None
+
+        normalized_origin_area = normalize_text(origin_area) if origin_area else None
+        normalized_origin_super_area = normalize_text(origin_super_area) if origin_super_area else None
+        if len(candidates) > 1 and normalized_origin_area:
+            area_matched = [
+                entity
+                for entity in candidates
+                if normalize_text(entity.area or "") == normalized_origin_area
+            ]
+            if area_matched:
+                candidates = area_matched
+        if len(candidates) > 1 and normalized_origin_super_area:
+            super_area_matched = [
+                entity
+                for entity in candidates
+                if normalize_text(entity.super_area or "") == normalized_origin_super_area
+            ]
+            if super_area_matched:
+                candidates = super_area_matched
+        if len(candidates) != 1:
+            return None
+
+        matched = candidates[0]
+        canonical_action = action or "turn_on"
+        return ResolvedLocalCommand(
+            canonical_text=f"{CANONICAL_ACTION_TEXT.get(canonical_action, canonical_action)} {matched.name}".strip(),
+            action=canonical_action,
+            target_name=matched.name,
+            tool_group=None,
+            area=matched.area,
+            super_area=matched.super_area,
+            source="compound_exact_matcher",
         )
 
     def _compound_segment_exact_target_match(self, match_result) -> bool:

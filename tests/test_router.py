@@ -627,6 +627,56 @@ def test_llm_translated_local_reports_partial_success_for_compound_commands() ->
     assert result.trace.compound_local_partial_success is True
 
 
+def test_compound_partial_resolution_executes_resolved_segments_and_reports_unresolved() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target("light.office", "Office Light", domain="light", area="Office"),
+    ]
+    llm_adapter = _FakeLLMAdapter(
+        [
+            _Translation(False, None, mode="general", notes="unresolved"),
+            _Translation(False, None, mode="general", notes="unresolved"),
+        ],
+        _outcome(True, "llm answer"),
+        classification=_Classification("tool_request", 0.99, intent_family="entity_control"),
+    )
+    agent_adapter = _FakeAgentAdapter([
+        _outcome(True, "Office light turned on"),
+    ])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=FuzzyMatcher(_config().fuzzy_threshold, _config().ambiguity_gap),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="turn on the office light and mystery lamp and hidden fan",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert result.outcome.success is True
+    assert "Done:" in (result.outcome.response_text or "")
+    assert "Failed:" in (result.outcome.response_text or "")
+    assert "turn on office light" in (result.outcome.response_text or "")
+    assert "turn on mystery lamp: Could not resolve this target" in (result.outcome.response_text or "")
+    assert "turn on hidden fan: Could not resolve this target" in (result.outcome.response_text or "")
+    assert [call["text"] for call in agent_adapter.calls] == ["turn on office light"]
+    assert llm_adapter.fallback_calls == []
+    assert result.trace.compound_local_partial_success is True
+    assert result.trace.compound_local_commands == ["turn on office light"]
+    assert len(result.trace.compound_local_outcomes) == 3
+    assert result.trace.compound_local_outcomes[1]["error_code"] == "unresolved_segment"
+    assert result.trace.llm_translation_summary["notes"] == "compound_entity_partial_match"
+
+
 def test_translate_mode_compound_failure_returns_failed_when_all_subcommands_fail() -> None:
     match = _MatchResult(best=None, top=[])
     translation = _Translation(
@@ -727,6 +777,65 @@ def test_llm_translated_local_compound_success_keeps_suboutcomes_in_raw_only() -
     assert isinstance(result.outcome.raw, list)
     assert len(result.outcome.raw) == 3
     assert result.trace.compound_local_partial_success is False
+
+
+def test_compound_same_action_exact_segment_match_beats_entrance_light_ambiguity() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target("light.kitchen", "Kitchen Light", domain="light", area="Kitchen"),
+        _entity_target("light.sink", "Sink Light", domain="light", area="Kitchen"),
+        _entity_target("light.great_room", "Great Room Light", domain="light", area="Great Room"),
+        _entity_target(
+            "light.great_room_entrance",
+            "Great Room Entrance Light",
+            domain="light",
+            area="Great Room",
+        ),
+    ]
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _outcome(True, "llm answer"),
+        classification=_Classification("tool_request", 0.99, intent_family="entity_control"),
+    )
+    agent_adapter = _FakeAgentAdapter(
+        [
+            _outcome(True, "Turned off the light"),
+            _outcome(True, "Turned off the light"),
+            _outcome(True, "Turned off the light"),
+        ]
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=FuzzyMatcher(_config().fuzzy_threshold, _config().ambiguity_gap),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="Turn off the kitchen light and the great room light and the great room entrance light",
+            language="en",
+            conversation_id=None,
+            context=None,
+            origin_area="Office",
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert llm_adapter.translate_calls == []
+    assert llm_adapter.fallback_calls == []
+    assert [call["text"] for call in agent_adapter.calls] == [
+        "turn off kitchen light",
+        "turn off great room light",
+        "turn off great room entrance light",
+    ]
+    assert result.trace.compound_local_commands == [
+        "turn off kitchen light",
+        "turn off great room light",
+        "turn off great room entrance light",
+    ]
 
 
 def test_non_translate_classification_is_traced_but_does_not_change_routing() -> None:

@@ -1715,6 +1715,7 @@ class AgentRouter:
             return None
 
         resolved_commands: list[ResolvedLocalCommand] = []
+        unresolved_segments: list[dict[str, Any]] = []
         effective_area = origin_area
         effective_super_area = origin_super_area
         debug_segments: list[dict[str, Any]] = []
@@ -1740,23 +1741,48 @@ class AgentRouter:
                     origin_super_area=effective_super_area,
                     preserve_raw_text=False,
                 )
-                if not (translation.valid and translation.canonical_text):
-                    return None
-                if translation.resolved_commands:
-                    resolved = translation.resolved_commands[0]
+                if translation.valid and translation.canonical_text:
+                    if translation.resolved_commands:
+                        resolved = translation.resolved_commands[0]
+                    else:
+                        resolved = ResolvedLocalCommand(
+                            canonical_text=translation.canonical_text,
+                            action=action,
+                            target_name=None,
+                            tool_group=translation.tool_group,
+                            area=self._infer_area_from_command_text(translation.canonical_text, catalog),
+                            super_area=self._infer_super_area_from_command_text(
+                                translation.canonical_text,
+                                catalog,
+                            ),
+                            source=translation.source,
+                        )
                 else:
-                    resolved = ResolvedLocalCommand(
-                        canonical_text=translation.canonical_text,
-                        action=action,
-                        target_name=None,
-                        tool_group=translation.tool_group,
-                        area=self._infer_area_from_command_text(translation.canonical_text, catalog),
-                        super_area=self._infer_super_area_from_command_text(
-                            translation.canonical_text,
-                            catalog,
-                        ),
-                        source=translation.source,
+                    unresolved_segments.append(
+                        {
+                            "input": segment_text,
+                            "action": action,
+                            "explicit_action": explicit_action,
+                            "reason": "unresolved_segment",
+                            "source": getattr(translation, "source", None),
+                        }
                     )
+                    debug_segments.append(
+                        {
+                            "input": segment_text,
+                            "action": action,
+                            "explicit_action": explicit_action,
+                            "canonical_text": None,
+                            "target": None,
+                            "area": effective_area,
+                            "super_area": effective_super_area,
+                            "tool_group": None,
+                            "source": getattr(translation, "source", None),
+                            "failed": True,
+                            "reason": "unresolved_segment",
+                        }
+                    )
+                    continue
 
             resolved_commands.append(resolved)
             debug_segments.append(
@@ -1777,16 +1803,19 @@ class AgentRouter:
             if resolved.super_area:
                 effective_super_area = resolved.super_area
 
+        if not resolved_commands:
+            return None
+
         translation = LLMTranslationResult(
             mode="translate",
             canonical_text=" and ".join(command.canonical_text for command in resolved_commands),
             tool_group="mixed" if len({command.tool_group for command in resolved_commands}) > 1 else resolved_commands[0].tool_group,
             confidence=0.9,
-            notes="compound_entity_builder_match",
+            notes="compound_entity_builder_match" if not unresolved_segments else "compound_entity_partial_match",
             valid=True,
             source="compound_router",
             intent_family="compound_entity_control",
-            confidence_reason="fully_resolved_compound_segments",
+            confidence_reason="fully_resolved_compound_segments" if not unresolved_segments else "partially_resolved_compound_segments",
             debug={"match_engine": "compound_router", "segments": debug_segments},
             raw_text=None,
             resolved_commands=resolved_commands,
@@ -1823,6 +1852,12 @@ class AgentRouter:
             extra_system_prompt=None,
             trace=trace,
         )
+        if unresolved_segments:
+            translated_outcome = self._merge_unresolved_compound_segments(
+                translated_outcome=translated_outcome,
+                unresolved_segments=unresolved_segments,
+                trace=trace,
+            )
         trace.llm_translated_local_executed = True
         trace.llm_translated_local_outcome = (
             "success" if translated_outcome.success else "failed"
@@ -1848,6 +1883,79 @@ class AgentRouter:
             path=ResolutionPath.LLM_TRANSLATED_LOCAL,
             outcome=translated_outcome,
             trace=trace,
+        )
+
+    def _merge_unresolved_compound_segments(
+        self,
+        *,
+        translated_outcome: LocalAgentOutcome,
+        unresolved_segments: list[dict[str, Any]],
+        trace: ResolutionTrace,
+    ) -> LocalAgentOutcome:
+        unresolved_outcomes = [
+            {
+                "command": segment["input"],
+                "success": False,
+                "response_text": "Could not resolve this target",
+                "response_type": "error",
+                "error_code": "unresolved_segment",
+                "failure_category": FailureCategory.NO_INTENT_MATCHED.value,
+            }
+            for segment in unresolved_segments
+        ]
+
+        existing = list(trace.compound_local_outcomes)
+        trace.compound_local_outcomes = [*existing, *unresolved_outcomes]
+
+        success_entries = [entry for entry in trace.compound_local_outcomes if entry.get("success")]
+        failure_entries = [entry for entry in trace.compound_local_outcomes if not entry.get("success")]
+        trace.compound_local_partial_success = bool(success_entries and failure_entries)
+
+        if not translated_outcome.success:
+            return translated_outcome
+
+        response_text = translated_outcome.response_text or ""
+        unresolved_text = "; ".join(
+            f"{segment['input']}: Could not resolve this target"
+            for segment in unresolved_segments
+        )
+        if unresolved_text:
+            if "Failed:" in response_text:
+                response_text = f"{response_text}; {unresolved_text}"
+            elif response_text:
+                response_text = f"{response_text}. Failed: {unresolved_text}"
+            else:
+                response_text = f"Failed: {unresolved_text}"
+
+        raw_outcomes = list(translated_outcome.raw) if isinstance(translated_outcome.raw, list) else translated_outcome.raw
+        if isinstance(raw_outcomes, list):
+            raw_outcomes = [
+                *raw_outcomes,
+                *[
+                    LocalAgentOutcome(
+                        success=False,
+                        response=None,
+                        response_text="Could not resolve this target",
+                        failure_category=FailureCategory.NO_INTENT_MATCHED,
+                        raw=segment,
+                        response_type="error",
+                        error_code="unresolved_segment",
+                    )
+                    for segment in unresolved_segments
+                ],
+            ]
+
+        return LocalAgentOutcome(
+            success=True,
+            response=None,
+            response_text=response_text,
+            failure_category=None,
+            raw=raw_outcomes,
+            response_type=translated_outcome.response_type,
+            error_code="partial_success",
+            processed_locally=translated_outcome.processed_locally,
+            conversation_id=translated_outcome.conversation_id,
+            continue_conversation=translated_outcome.continue_conversation,
         )
 
     def _parse_compound_local_segments(
@@ -1927,7 +2035,7 @@ class AgentRouter:
             ambiguity_gap=self._config.ambiguity_gap,
             high_risk_threshold=self._config.high_risk_threshold,
         )
-        if not decision.allowed:
+        if not decision.allowed and not self._compound_segment_exact_target_match(match_result):
             return None
         assist_input = match_result.best.canonical_phrase
         area = self._infer_area_from_command_text(assist_input, catalog)
@@ -1941,6 +2049,18 @@ class AgentRouter:
             super_area=super_area,
             source="compound_fuzzy_matcher",
         )
+
+    def _compound_segment_exact_target_match(self, match_result) -> bool:
+        best = getattr(match_result, "best", None)
+        if best is None or getattr(best, "candidate_type", None) != CandidateType.ENTITY_COMMAND:
+            return False
+        target_name = normalize_text(getattr(best, "target_name", None) or "")
+        parsed_target = normalize_text(
+            getattr(match_result, "parsed_target_after_normalization", None)
+            or getattr(match_result, "parsed_target_before_normalization", None)
+            or ""
+        )
+        return bool(target_name and parsed_target and target_name == parsed_target)
 
     def _infer_area_from_command_text(self, command_text: str, catalog) -> str | None:
         normalized = normalize_text(command_text)

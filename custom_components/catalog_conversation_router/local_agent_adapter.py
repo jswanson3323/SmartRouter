@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Any
 
 from .models import FailureCategory, LocalAgentOutcome
 
 _LOGGER = logging.getLogger(__name__)
+
+SLOW_AGENT_CALL_MS = 3000.0
 
 
 class AgentAdapter:
@@ -64,7 +67,25 @@ class AgentAdapter:
             if extra_system_prompt is not None:
                 converse_kwargs["extra_system_prompt"] = extra_system_prompt
 
+            started = perf_counter()
             response = await conversation.async_converse(**converse_kwargs)
+            elapsed_ms = (perf_counter() - started) * 1000
+            if elapsed_ms >= SLOW_AGENT_CALL_MS:
+                _LOGGER.warning(
+                    "Slow agent call: %.1f ms configured_agent_id=%s resolved_agent_id=%s conversation_id=%s text=%r",
+                    elapsed_ms,
+                    agent_id,
+                    resolved_agent_id,
+                    conversation_id,
+                    text[:120],
+                )
+            else:
+                _LOGGER.debug(
+                    "Agent call finished in %.1f ms configured_agent_id=%s resolved_agent_id=%s",
+                    elapsed_ms,
+                    agent_id,
+                    resolved_agent_id,
+                )
             _LOGGER.debug("FULL LOCAL RESPONSE OBJECT: %r", response)
             _LOGGER.debug("LOCAL RESPONSE TYPE OBJECT: %r", type(response))
             _LOGGER.debug("LOCAL RESPONSE __dict__: %s", getattr(response, "__dict__", None))

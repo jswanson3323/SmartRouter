@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+from time import perf_counter
 from functools import partial
 from typing import Any
 
@@ -16,6 +17,8 @@ from .semantic_intent import SemanticIntentRanker, SemanticRequestClassification
 from .semantic_service import RemoteSemanticIntentRanker
 
 _LOGGER = logging.getLogger(__name__)
+
+SLOW_SEMANTIC_CLASSIFICATION_MS = 1500.0
 
 JSON_BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
 
@@ -141,15 +144,40 @@ class LLMAdapter:
         """Classify whether an utterance is tool-oriented or general/open-domain."""
         if not getattr(self._semantic_ranker, "available", lambda: False)():
             return None
+        started = perf_counter()
         classify = partial(
             self._local_intent_resolver.classify_request,
             utterance=utterance,
             catalog=catalog,
         )
         hass = getattr(self._agent_adapter, "hass", None)
-        if hass is not None and hasattr(hass, "async_add_executor_job"):
-            return await hass.async_add_executor_job(classify)
-        return classify()
+        try:
+            if hass is not None and hasattr(hass, "async_add_executor_job"):
+                result = await hass.async_add_executor_job(classify)
+            else:
+                result = classify()
+        finally:
+            elapsed_ms = (perf_counter() - started) * 1000
+            if elapsed_ms >= SLOW_SEMANTIC_CLASSIFICATION_MS:
+                unavailable_reason = getattr(
+                    self._semantic_ranker,
+                    "unavailable_reason",
+                    lambda: None,
+                )()
+                _LOGGER.warning(
+                    "Slow semantic classification: %.1f ms utterance=%r available=%s unavailable_reason=%r",
+                    elapsed_ms,
+                    utterance[:120],
+                    getattr(self._semantic_ranker, "available", lambda: False)(),
+                    unavailable_reason,
+                )
+            else:
+                _LOGGER.debug(
+                    "Semantic classification finished in %.1f ms utterance=%r",
+                    elapsed_ms,
+                    utterance[:120],
+                )
+        return result
 
     async def async_translate_for_local(
         self,

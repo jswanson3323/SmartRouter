@@ -64,6 +64,7 @@ from .local_agent_adapter import AgentAdapter
 from .matcher import FuzzyMatcher
 from .models import RouterConfig
 from .services import async_register_services, async_unregister_services
+from .trace_store import ConversationTraceStore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class IntegrationRuntime:
     catalog_manager: CatalogManager
     router: AgentRouter
     conversation_agent: CatalogRouterConversationAgent
+    trace_store: ConversationTraceStore
     legacy_agent_alias: object | None = None
     migration_task: asyncio.Task | None = None
     unsub_refresh: callable | None = None
@@ -210,6 +212,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         router=router,
         language=cfg.language,
         entry_id=entry.entry_id,
+        trace_store=ConversationTraceStore(
+            hass,
+            entry_id=entry.entry_id,
+            enabled=cfg.debug_enabled,
+        ),
     )
     legacy_agent_alias = CatalogRouterLegacyAgentAlias(
         legacy_agent_id=entry.entry_id,
@@ -222,6 +229,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         catalog_manager=catalog_manager,
         router=router,
         conversation_agent=conv_agent,
+        trace_store=conv_agent.trace_store,
         legacy_agent_alias=legacy_agent_alias,
     )
 

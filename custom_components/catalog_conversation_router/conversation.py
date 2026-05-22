@@ -9,8 +9,12 @@ from time import perf_counter
 from typing import Any
 
 from .models import LocalAgentOutcome, RouterResult, StreamingFallbackRequest
+from .trace_store import ConversationTraceStore
 
 _LOGGER = logging.getLogger(__name__)
+
+SLOW_STREAM_FIRST_DELTA_MS = 3000.0
+SLOW_STREAM_TOTAL_MS = 5000.0
 
 _IMPORT_ERROR: Exception | None = None
 
@@ -64,14 +68,26 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
 
     _attr_supports_streaming = True
 
-    def __init__(self, router, language: str, entry_id: str) -> None:
+    def __init__(
+        self,
+        router,
+        language: str,
+        entry_id: str,
+        trace_store: ConversationTraceStore,
+    ) -> None:
         self._router = router
         self._language = language
         self._hass = getattr(router, "_hass", None)
         self._entry_id = entry_id
+        self._trace_store = trace_store
         self._attr_name = "Catalog Conversation Router"
         self._attr_unique_id = entry_id
         self.entity_id = f"conversation.catalog_conversation_router_{entry_id.lower()}"
+
+    @property
+    def trace_store(self) -> ConversationTraceStore:
+        """Return the trace store used by this conversation agent."""
+        return self._trace_store
 
     @property
     def id(self) -> str:
@@ -108,7 +124,14 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             user_input,
             allow_streaming_llm_fallback=False,
         )
-        return self._finalize_non_streaming_response(user_input, result)
+        response = self._finalize_non_streaming_response(user_input, result)
+        self._schedule_trace_log(
+            user_input=user_input,
+            result=result,
+            outcome=result.outcome,
+            streamed=False,
+        )
+        return response
 
     async def _async_handle_message(
         self,
@@ -122,7 +145,14 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         )
 
         if result.streaming_request is None:
-            return self._finalize_non_streaming_response(user_input, result)
+            response = self._finalize_non_streaming_response(user_input, result)
+            self._schedule_trace_log(
+                user_input=user_input,
+                result=result,
+                outcome=result.outcome,
+                streamed=False,
+            )
+            return response
 
         if not _STREAMING_CONVERSATION_API_AVAILABLE:
             result.trace.llm_fallback_stream_supported = False
@@ -132,7 +162,14 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 user_input,
                 allow_streaming_llm_fallback=False,
             )
-            return self._finalize_non_streaming_response(user_input, blocking_result)
+            response = self._finalize_non_streaming_response(user_input, blocking_result)
+            self._schedule_trace_log(
+                user_input=user_input,
+                result=blocking_result,
+                outcome=blocking_result.outcome,
+                streamed=False,
+            )
+            return response
 
         stream_started = perf_counter()
         stream_outcome = await self._async_execute_streaming_fallback(
@@ -151,7 +188,34 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             agent_id=result.streaming_request.llm_agent_id,
         )
         _LOGGER.debug("Post-stream resolution trace: %s", result.trace.as_dict())
+        self._schedule_trace_log(
+            user_input=user_input,
+            result=result,
+            outcome=stream_outcome,
+            streamed=True,
+        )
         return async_get_result_from_chat_log(user_input, chat_log)
+
+    def _schedule_trace_log(
+        self,
+        *,
+        user_input: ConversationInput,
+        result: RouterResult,
+        outcome: LocalAgentOutcome,
+        streamed: bool,
+    ) -> None:
+        """Persist the completed route trace without blocking the response."""
+        if self._hass is None or not self._trace_store.enabled:
+            return
+        self._hass.async_create_task(
+            self._trace_store.async_write_turn(
+                user_input=user_input,
+                result=result,
+                outcome=outcome,
+                streamed=streamed,
+            ),
+            name=f"catalog_router_trace_log_{self._entry_id}",
+        )
 
     async def _route_request(
         self,
@@ -247,10 +311,29 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         stream_done = object()
         chunk_count = 0
         content_parts: list[str] = []
+        stream_started = perf_counter()
+        first_delta_at: float | None = None
 
         def _delta_listener(_downstream_chat_log, delta: dict[str, Any]) -> None:
-            nonlocal chunk_count
+            nonlocal chunk_count, first_delta_at
             chunk_count += 1
+            if first_delta_at is None:
+                first_delta_at = perf_counter()
+                first_delta_ms = (first_delta_at - stream_started) * 1000
+                if first_delta_ms >= SLOW_STREAM_FIRST_DELTA_MS:
+                    _LOGGER.warning(
+                        "Slow streaming fallback first delta: %.1f ms agent_id=%s conversation_id=%s utterance=%r",
+                        first_delta_ms,
+                        request.llm_agent_id,
+                        request.conversation_id,
+                        request.utterance[:120],
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Streaming fallback first delta in %.1f ms agent_id=%s",
+                        first_delta_ms,
+                        request.llm_agent_id,
+                    )
             if delta.get("content"):
                 content_parts.append(str(delta["content"]))
             delta_queue.put_nowait(dict(delta))
@@ -364,6 +447,25 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         trace.llm_fallback_stream_chunk_count = chunk_count
         if chunk_count == 0:
             trace.llm_fallback_stream_fallback_reason = "no_deltas_emitted"
+        total_stream_ms = (perf_counter() - stream_started) * 1000
+        if total_stream_ms >= SLOW_STREAM_TOTAL_MS:
+            _LOGGER.warning(
+                "Slow streaming fallback total: %.1f ms agent_id=%s conversation_id=%s chunks=%s first_delta_ms=%s",
+                total_stream_ms,
+                request.llm_agent_id,
+                request.conversation_id,
+                chunk_count,
+                round((first_delta_at - stream_started) * 1000, 1)
+                if first_delta_at is not None
+                else None,
+            )
+        else:
+            _LOGGER.debug(
+                "Streaming fallback total %.1f ms agent_id=%s chunks=%s",
+                total_stream_ms,
+                request.llm_agent_id,
+                chunk_count,
+            )
         return outcome
 
     def _finalize_non_streaming_response(

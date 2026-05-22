@@ -41,6 +41,8 @@ from .semantic_intent import (
 from .safety import validate_fuzzy_execution
 
 _LOGGER = logging.getLogger(__name__)
+
+SLOW_ROUTE_MS = 5000.0
 LLM_FALLBACK_TOOLS_REQUIRED_MARKER = "ROUTER_LLM_FALLBACK_NEEDS_TOOLS=1"
 SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
 STATUS_QUERY_HINTS = (
@@ -273,6 +275,27 @@ class AgentRouter:
             streaming_request: StreamingFallbackRequest | None = None,
         ) -> RouterResult:
             trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+            if trace.route_duration_ms >= SLOW_ROUTE_MS:
+                _LOGGER.warning(
+                    "Slow router path: %.1f ms selected_path=%s final_executor=%s semantic_kind=%s semantic_source=%s fuzzy_ms=%s llm_translation_ms=%s llm_fallback_ms=%s conversation_id=%s text=%r",
+                    trace.route_duration_ms,
+                    path.value,
+                    trace.final_executor,
+                    trace.semantic_request_classification_kind,
+                    trace.semantic_request_routing_source,
+                    trace.fuzzy_match_duration_ms,
+                    trace.llm_translation_duration_ms,
+                    trace.llm_fallback_duration_ms,
+                    conversation_id,
+                    text[:120],
+                )
+            else:
+                _LOGGER.debug(
+                    "Router path completed in %.1f ms selected_path=%s final_executor=%s",
+                    trace.route_duration_ms,
+                    path.value,
+                    trace.final_executor,
+                )
             return RouterResult(
                 path=path,
                 outcome=outcome,
@@ -506,48 +529,7 @@ class AgentRouter:
         semantic_request_classification: SemanticRequestClassification | None = None
         direct_llm_only = False
         compound_pipeline_failed = False
-        semantic_request_classification = await self._llm_adapter.async_classify_request(
-            utterance=text,
-            catalog=catalog,
-        )
-        trace.semantic_request_classification_available = (
-            semantic_request_classification is not None
-        )
-        if semantic_request_classification is not None:
-            trace.semantic_request_classification_kind = (
-                semantic_request_classification.kind
-            )
-            trace.semantic_request_classification_confidence = round(
-                semantic_request_classification.confidence,
-                4,
-            )
-            trace.semantic_request_classification_intent_family = (
-                semantic_request_classification.intent_family
-            )
-            trace.semantic_request_classification_reason = (
-                semantic_request_classification.reason
-            )
-            trace.semantic_request_classification_debug = (
-                semantic_request_classification.debug
-            )
-            direct_llm_only = bool(
-                semantic_request_classification.kind == "general_request"
-                and semantic_request_classification.confidence
-                >= REQUEST_GENERAL_BYPASS_THRESHOLD
-            )
-            trace.semantic_request_routing_source = (
-                "semantic_classifier" if direct_llm_only else "semantic_classifier_advisory"
-            )
-        else:
-            direct_llm_only = self._should_bypass_local_pipeline_for_llm(
-                text=text,
-                catalog=catalog,
-            )
-            trace.semantic_request_routing_source = (
-                "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
-            )
-
-        if compound_local_control_request and not direct_llm_only:
+        if compound_local_control_request:
             compound_result = await self._try_compound_local_control(
                 text=text,
                 language=language,
@@ -567,28 +549,27 @@ class AgentRouter:
                 return compound_result
             compound_pipeline_failed = True
 
-        if not direct_llm_only:
-            state_result = await self._try_local_state_query(
-                text=text,
-                language=language,
-                conversation_id=conversation_id,
-                context=context,
-                trace=trace,
-                catalog=catalog,
-                origin_area=resolved_origin_area,
-                origin_super_area=resolved_origin_super_area,
-                device_id=device_id,
-                satellite_id=satellite_id,
-                extra_system_prompt=extra_system_prompt,
-                preserve_llm_owner=False,
-            )
-            if state_result is not None:
-                trace.selected_path = ResolutionPath.LOCAL_STATE_QUERY
-                trace.final_executor = "local"
-                trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
-                return state_result
+        state_result = await self._try_local_state_query(
+            text=text,
+            language=language,
+            conversation_id=conversation_id,
+            context=context,
+            trace=trace,
+            catalog=catalog,
+            origin_area=resolved_origin_area,
+            origin_super_area=resolved_origin_super_area,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=extra_system_prompt,
+            preserve_llm_owner=False,
+        )
+        if state_result is not None:
+            trace.selected_path = ResolutionPath.LOCAL_STATE_QUERY
+            trace.final_executor = "local"
+            trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+            return state_result
 
-        if compound_local_control_request or direct_llm_only:
+        if compound_local_control_request:
             match_result = SimpleNamespace(
                 best=None,
                 top_candidates=[],
@@ -804,6 +785,53 @@ class AgentRouter:
                 "ambiguity_gap": self._config.ambiguity_gap,
             }
             _LOGGER.debug("Fuzzy candidate rejected before execution: compound local control request")
+
+        if selected_path == ResolutionPath.FUZZY_LOCAL:
+            trace.semantic_request_classification_available = False
+            trace.semantic_request_routing_source = "skipped_due_to_fuzzy_match"
+        else:
+            semantic_request_classification = await self._llm_adapter.async_classify_request(
+                utterance=text,
+                catalog=catalog,
+            )
+            trace.semantic_request_classification_available = (
+                semantic_request_classification is not None
+            )
+            if semantic_request_classification is not None:
+                trace.semantic_request_classification_kind = (
+                    semantic_request_classification.kind
+                )
+                trace.semantic_request_classification_confidence = round(
+                    semantic_request_classification.confidence,
+                    4,
+                )
+                trace.semantic_request_classification_intent_family = (
+                    semantic_request_classification.intent_family
+                )
+                trace.semantic_request_classification_reason = (
+                    semantic_request_classification.reason
+                )
+                trace.semantic_request_classification_debug = (
+                    semantic_request_classification.debug
+                )
+                direct_llm_only = bool(
+                    semantic_request_classification.kind == "general_request"
+                    and semantic_request_classification.confidence
+                    >= REQUEST_GENERAL_BYPASS_THRESHOLD
+                )
+                trace.semantic_request_routing_source = (
+                    "semantic_classifier"
+                    if direct_llm_only
+                    else "semantic_classifier_advisory"
+                )
+            else:
+                direct_llm_only = self._should_bypass_local_pipeline_for_llm(
+                    text=text,
+                    catalog=catalog,
+                )
+                trace.semantic_request_routing_source = (
+                    "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
+                )
 
         # 2) LLM translation to local
         if compound_local_control_request:

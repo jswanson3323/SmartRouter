@@ -292,6 +292,36 @@ def test_fuzzy_path_success() -> None:
     assert result.trace.route_duration_ms is not None
 
 
+def test_fuzzy_path_success_skips_semantic_classification() -> None:
+    match = _MatchResult(best=_Candidate("turn on kitchen light"), top=[_Candidate("turn on kitchen light")])
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _outcome(True),
+        classification=_Classification("tool_request", 0.95, intent_family="entity_control"),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(match),
+        agent_adapter=_FakeAgentAdapter([_outcome(True)]),
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="turn on kitchen line",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "fuzzy_local"
+    assert llm_adapter.classify_calls == []
+    assert result.trace.semantic_request_classification_available is False
+    assert result.trace.semantic_request_routing_source == "skipped_due_to_fuzzy_match"
+
+
 def test_fuzzy_path_prefers_great_room_fan_for_band() -> None:
     candidate = _Candidate("turn on great room fan")
     candidate.candidate_id = "fan.great_room_fan"

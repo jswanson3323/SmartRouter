@@ -322,6 +322,37 @@ def test_fuzzy_path_success_skips_semantic_classification() -> None:
     assert result.trace.semantic_request_routing_source == "skipped_due_to_fuzzy_match"
 
 
+def test_acknowledgement_bypasses_semantic_and_translation() -> None:
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _outcome(True, text="Yes, sir. How may I assist you today?"),
+        classification=_Classification("tool_request", 0.95, intent_family="general"),
+    )
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=_FakeAgentAdapter([]),
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="Yeah",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert llm_adapter.classify_calls == []
+    assert llm_adapter.translate_calls == []
+    assert result.trace.semantic_request_classification_available is False
+    assert result.trace.semantic_request_routing_source == "acknowledgement_bypass"
+
+
 def test_fuzzy_path_prefers_great_room_fan_for_band() -> None:
     candidate = _Candidate("turn on great room fan")
     candidate.candidate_id = "fan.great_room_fan"

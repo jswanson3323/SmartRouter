@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 import logging
 from pathlib import Path
 import re
@@ -52,15 +53,16 @@ class ConversationTraceStore:
             outcome=outcome,
             streamed=streamed,
         )
+        safe_payload = self._sanitize_for_yaml(payload)
 
         def _write() -> Path:
             output_dir = Path(self._hass.config.path(DOMAIN, TRACE_LOG_DIRNAME))
             output_dir.mkdir(parents=True, exist_ok=True)
             self._purge_old_logs(output_dir)
-            output_path = output_dir / self._build_filename(payload)
+            output_path = output_dir / self._build_filename(safe_payload)
             output_path.write_text(
                 yaml.safe_dump(
-                    payload,
+                    safe_payload,
                     sort_keys=False,
                     allow_unicode=False,
                 ),
@@ -137,3 +139,24 @@ class ConversationTraceStore:
                     path.unlink()
                 except OSError:
                     _LOGGER.warning("Failed to purge old conversation trace log %s", path)
+
+    def _sanitize_for_yaml(self, value: Any) -> Any:
+        """Convert arbitrary trace payloads into YAML-safe primitives."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, dict):
+            return {
+                str(key): self._sanitize_for_yaml(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [self._sanitize_for_yaml(item) for item in value]
+        if hasattr(value, "__dict__"):
+            return self._sanitize_for_yaml(vars(value))
+        return repr(value)

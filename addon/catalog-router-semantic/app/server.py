@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+import hashlib
 import json
 import os
 import re
 from pathlib import Path
+import threading
 from typing import Any
 
 from fastapi import FastAPI
@@ -19,6 +22,7 @@ CONCRETE_PATTERN_RE = re.compile(r"[\[\]\(\)\{\}\|]")
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8099
 DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+MAX_DOC_VECTOR_CACHES = 8
 
 app = FastAPI(title="Catalog Router Semantic Service")
 
@@ -68,6 +72,8 @@ class SemanticService:
         options = self._load_options()
         self.model_name = str(options.get("model_name") or DEFAULT_MODEL_NAME)
         self.embedder = TextEmbedding(model_name=self.model_name, lazy_load=False)
+        self._doc_vector_caches: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._cache_lock = threading.Lock()
 
     def rank_phrase(self, request: PhraseRequest) -> dict[str, Any]:
         docs: list[tuple[str, str, str, bool, bool, str]] = []
@@ -87,7 +93,12 @@ class SemanticService:
                     )
                 )
 
-        ranked = self._rank(self._semantic_phrase_text(request.utterance), [doc[2] for doc in docs])
+        doc_texts = [doc[2] for doc in docs]
+        ranked = self._rank_cached(
+            self._semantic_phrase_text(request.utterance),
+            doc_texts,
+            cache_namespace="phrase",
+        )
         candidates = []
         seen: set[str] = set()
         for idx, score in ranked:
@@ -111,7 +122,11 @@ class SemanticService:
     def rank_entity(self, request: EntityRequest) -> dict[str, Any]:
         query_text = self._normalize_text(request.utterance)
 
-        ranked = self._rank(query_text, [doc.semantic_text for doc in request.commands])
+        ranked = self._rank_cached(
+            query_text,
+            [doc.semantic_text for doc in request.commands],
+            cache_namespace="entity",
+        )
         candidates = []
         deduped: dict[tuple[str, str], dict[str, Any]] = {}
         for idx, score in ranked:
@@ -180,7 +195,11 @@ class SemanticService:
         ):
             docs.append(("general_request", family, text))
 
-        ranked = self._rank(self._semantic_phrase_text(request.utterance), [doc[2] for doc in docs])
+        ranked = self._rank_cached(
+            self._semantic_phrase_text(request.utterance),
+            [doc[2] for doc in docs],
+            cache_namespace="classification",
+        )
         if not ranked:
             return {
                 "kind": "general_request",
@@ -256,6 +275,67 @@ class SemanticService:
             results.append((idx, self._cosine(utter_vector, doc_vector)))
         results.sort(key=lambda item: item[1], reverse=True)
         return results
+
+    def _rank_cached(
+        self,
+        utterance: str,
+        docs: list[str],
+        *,
+        cache_namespace: str,
+    ) -> list[tuple[int, float]]:
+        if not utterance or not docs:
+            return []
+        doc_vectors = self._get_cached_doc_vectors(
+            cache_namespace=cache_namespace,
+            docs=docs,
+        )
+        utter_vector = list(self.embedder.embed([utterance]))[0]
+        results: list[tuple[int, float]] = []
+        for idx, doc_vector in enumerate(doc_vectors):
+            results.append((idx, self._cosine(utter_vector, doc_vector)))
+        results.sort(key=lambda item: item[1], reverse=True)
+        return results
+
+    def _get_cached_doc_vectors(
+        self,
+        *,
+        cache_namespace: str,
+        docs: list[str],
+    ) -> list[Any]:
+        cache_key = self._doc_cache_key(cache_namespace=cache_namespace, docs=docs)
+        with self._cache_lock:
+            cache_entry = self._doc_vector_caches.get(cache_key)
+            if cache_entry is not None:
+                self._doc_vector_caches.move_to_end(cache_key)
+                return cache_entry["vectors"]
+
+        vectors = list(self.embedder.embed(docs))
+
+        with self._cache_lock:
+            self._doc_vector_caches[cache_key] = {
+                "namespace": cache_namespace,
+                "doc_count": len(docs),
+                "vectors": vectors,
+            }
+            self._doc_vector_caches.move_to_end(cache_key)
+            while len(self._doc_vector_caches) > MAX_DOC_VECTOR_CACHES:
+                self._doc_vector_caches.popitem(last=False)
+
+        return vectors
+
+    def _doc_cache_key(self, *, cache_namespace: str, docs: list[str]) -> str:
+        payload = {
+            "namespace": cache_namespace,
+            "model_name": self.model_name,
+            "docs": docs,
+        }
+        key_json = json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(key_json.encode("utf-8")).hexdigest()
 
     def _semantic_phrase_text(self, text: str) -> str:
         stripped = SLOT_RE.sub(lambda match: f" {self._normalize_text(match.group(1))} ", text)
@@ -357,7 +437,11 @@ SERVICE = SemanticService()
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "model_name": SERVICE.model_name}
+    return {
+        "ok": True,
+        "model_name": SERVICE.model_name,
+        "doc_vector_cache_count": len(SERVICE._doc_vector_caches),
+    }
 
 
 @app.post("/rank/phrase")

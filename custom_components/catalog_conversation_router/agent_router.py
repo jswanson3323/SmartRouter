@@ -171,6 +171,19 @@ OPEN_DOMAIN_PREFIXES = (
     "summarize",
     "help me",
 )
+LOW_INFORMATION_ACKNOWLEDGEMENTS = {
+    "ok",
+    "okay",
+    "yes",
+    "yeah",
+    "yep",
+    "sure",
+    "correct",
+    "right",
+    "no",
+    "nope",
+    "nah",
+}
 SMART_HOME_HINT_TOKENS = {
     "light",
     "lights",
@@ -397,30 +410,35 @@ class AgentRouter:
                 "notes": "active_llm_conversation",
             }
             trace.llm_translated_local_executed = False
-            semantic_request_classification = await self._llm_adapter.async_classify_request(
-                utterance=text,
-                catalog=catalog,
-            )
-            if semantic_request_classification is not None:
-                trace.semantic_request_classification_available = True
-                trace.semantic_request_classification_kind = (
-                    semantic_request_classification.kind
-                )
-                trace.semantic_request_classification_confidence = round(
-                    semantic_request_classification.confidence,
-                    4,
-                )
-                trace.semantic_request_classification_intent_family = (
-                    semantic_request_classification.intent_family
-                )
-                trace.semantic_request_classification_reason = (
-                    semantic_request_classification.reason
-                )
-                trace.semantic_request_classification_debug = (
-                    semantic_request_classification.debug
-                )
-            else:
+            if self._is_low_information_acknowledgement(text):
                 trace.semantic_request_classification_available = False
+                trace.semantic_request_routing_source = "acknowledgement_bypass"
+                semantic_request_classification = None
+            else:
+                semantic_request_classification = await self._llm_adapter.async_classify_request(
+                    utterance=text,
+                    catalog=catalog,
+                )
+                if semantic_request_classification is not None:
+                    trace.semantic_request_classification_available = True
+                    trace.semantic_request_classification_kind = (
+                        semantic_request_classification.kind
+                    )
+                    trace.semantic_request_classification_confidence = round(
+                        semantic_request_classification.confidence,
+                        4,
+                    )
+                    trace.semantic_request_classification_intent_family = (
+                        semantic_request_classification.intent_family
+                    )
+                    trace.semantic_request_classification_reason = (
+                        semantic_request_classification.reason
+                    )
+                    trace.semantic_request_classification_debug = (
+                        semantic_request_classification.debug
+                    )
+                else:
+                    trace.semantic_request_classification_available = False
             llm_system_prompt = self._build_llm_fallback_system_prompt(
                 trace=trace,
                 text=text,
@@ -789,6 +807,10 @@ class AgentRouter:
         if selected_path == ResolutionPath.FUZZY_LOCAL:
             trace.semantic_request_classification_available = False
             trace.semantic_request_routing_source = "skipped_due_to_fuzzy_match"
+        elif self._is_low_information_acknowledgement(text):
+            direct_llm_only = True
+            trace.semantic_request_classification_available = False
+            trace.semantic_request_routing_source = "acknowledgement_bypass"
         else:
             semantic_request_classification = await self._llm_adapter.async_classify_request(
                 utterance=text,
@@ -1328,6 +1350,16 @@ class AgentRouter:
                 return False
 
         return len(utterance_tokens) >= 4
+
+    def _is_low_information_acknowledgement(self, text: str) -> bool:
+        """Return True for short acknowledgement turns that should skip semantic work."""
+        normalized = normalize_text(text)
+        if not normalized:
+            return False
+        if normalized in LOW_INFORMATION_ACKNOWLEDGEMENTS:
+            return True
+        utterance_tokens = tokenize(normalized)
+        return len(utterance_tokens) <= 2 and normalized in LOW_INFORMATION_ACKNOWLEDGEMENTS
 
     async def _try_local_state_query(
         self,

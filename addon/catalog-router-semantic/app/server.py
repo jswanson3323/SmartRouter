@@ -23,6 +23,28 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8099
 DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 MAX_DOC_VECTOR_CACHES = 8
+QUERY_OPENERS = (
+    "what is",
+    "whats",
+    "what are",
+    "status of",
+    "status for",
+    "what s",
+    "how is",
+    "how are",
+)
+QUERY_HINT_TOKENS = {
+    "status",
+    "state",
+    "temperature",
+    "temp",
+    "on",
+    "off",
+    "open",
+    "closed",
+    "locked",
+    "unlocked",
+}
 
 app = FastAPI(title="Catalog Router Semantic Service")
 
@@ -121,6 +143,7 @@ class SemanticService:
 
     def rank_entity(self, request: EntityRequest) -> dict[str, Any]:
         query_text = self._normalize_text(request.utterance)
+        utterance_norm = self._normalize_text(request.utterance)
 
         ranked = self._rank_cached(
             query_text,
@@ -132,21 +155,25 @@ class SemanticService:
         for idx, score in ranked:
             doc = request.commands[idx]
             adjusted = score + self._number_agreement_bonus(
-                utterance=self._normalize_text(request.utterance),
+                utterance=utterance_norm,
                 target_name=doc.target_name,
                 synthetic=doc.synthetic,
                 singular=doc.singular,
             )
             adjusted += self._target_overlap_bonus(
-                utterance=self._normalize_text(request.utterance),
+                utterance=utterance_norm,
                 target_name=doc.target_name,
             )
             adjusted += self._origin_area_bonus(
-                utterance=self._normalize_text(request.utterance),
+                utterance=utterance_norm,
                 area=doc.area,
                 super_area=doc.super_area,
                 origin_area=request.origin_area,
                 origin_super_area=request.origin_super_area,
+            )
+            adjusted += self._query_action_bonus(
+                utterance=utterance_norm,
+                action=doc.action,
             )
             item = {
                 "action": doc.action,
@@ -218,21 +245,25 @@ class SemanticService:
         debug_candidates: list[dict[str, Any]] = []
         for idx, score in ranked:
             kind, family, text = docs[idx]
+            adjusted_score = score + self._classification_intent_bonus(
+                utterance=self._semantic_phrase_text(request.utterance),
+                intent_family=family,
+            )
             if len(debug_candidates) < request.limit:
                 debug_candidates.append(
                     {
                         "kind": kind,
                         "intent_family": family,
                         "text": text,
-                        "score": round(score, 4),
+                        "score": round(adjusted_score, 4),
                     }
                 )
-            if kind == "tool_request" and score > best_tool_score:
-                best_tool_score = score
+            if kind == "tool_request" and adjusted_score > best_tool_score:
+                best_tool_score = adjusted_score
                 best_tool_family = family
                 best_tool_text = text
-            elif kind == "general_request" and score > best_general_score:
-                best_general_score = score
+            elif kind == "general_request" and adjusted_score > best_general_score:
+                best_general_score = adjusted_score
                 best_general_family = family
                 best_general_text = text
 
@@ -336,6 +367,41 @@ class SemanticService:
             sort_keys=True,
         )
         return hashlib.sha256(key_json.encode("utf-8")).hexdigest()
+
+    def _looks_like_query_utterance(self, utterance: str) -> bool:
+        normalized = self._normalize_text(utterance)
+        if not normalized:
+            return False
+        if any(normalized.startswith(prefix) for prefix in QUERY_OPENERS):
+            return True
+        tokens = set(normalized.split())
+        return "status" in tokens or "state" in tokens or (
+            ("what" in tokens or "how" in tokens)
+            and bool(tokens & QUERY_HINT_TOKENS)
+        )
+
+    def _query_action_bonus(self, *, utterance: str, action: str) -> float:
+        if not self._looks_like_query_utterance(utterance):
+            return 0.0
+        if action == "query":
+            return 0.12
+        if action in {"turn_on", "turn_off", "open", "close", "lock", "unlock", "start", "cancel"}:
+            return -0.08
+        return 0.0
+
+    def _classification_intent_bonus(
+        self,
+        *,
+        utterance: str,
+        intent_family: str | None,
+    ) -> float:
+        if not self._looks_like_query_utterance(utterance):
+            return 0.0
+        if intent_family == "entity_query":
+            return 0.1
+        if intent_family in {"entity_control", "compound_entity_control"}:
+            return -0.06
+        return 0.0
 
     def _semantic_phrase_text(self, text: str) -> str:
         stripped = SLOT_RE.sub(lambda match: f" {self._normalize_text(match.group(1))} ", text)

@@ -6,6 +6,7 @@ import types
 
 from custom_components.catalog_conversation_router.agent_router import AgentRouter
 from custom_components.catalog_conversation_router.llm_adapter import LLMAdapter
+from custom_components.catalog_conversation_router.local_intent import LocalIntentResolver
 from custom_components.catalog_conversation_router.matcher import FuzzyMatcher
 from custom_components.catalog_conversation_router.models import (
     CandidateType,
@@ -351,6 +352,61 @@ def test_acknowledgement_bypasses_semantic_and_translation() -> None:
     assert llm_adapter.translate_calls == []
     assert result.trace.semantic_request_classification_available is False
     assert result.trace.semantic_request_routing_source == "acknowledgement_bypass"
+
+
+def test_state_query_rejects_control_translation() -> None:
+    translation = _Translation(True, "turn on kitchen lights")
+    translation.intent_family = "entity_control"
+    llm_adapter = _FakeLLMAdapter(
+        translation,
+        _outcome(True, text="The kitchen lights are off."),
+    )
+    agent_adapter = _FakeAgentAdapter([_outcome(False, "Sorry, I couldn't understand that")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="Tell me the status of the kitchen",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert llm_adapter.translate_calls != []
+    assert len(agent_adapter.calls) == 1
+    assert agent_adapter.calls[0]["text"] == "Tell me the status of the kitchen"
+    assert result.trace.llm_translation_summary["notes"] == "state_query_control_conflict"
+    assert result.trace.state_query_detected is True
+
+
+def test_query_semantic_docs_include_status_variants() -> None:
+    resolver = LocalIntentResolver()
+    target = types.SimpleNamespace(
+        name="kitchen lights",
+        area="kitchen",
+        super_area=None,
+        tool_group="lighting",
+        actions={"query"},
+        synthetic=True,
+        normalized_name="kitchen lights",
+    )
+
+    docs = resolver._semantic_entity_command_docs([target])  # noqa: SLF001
+    semantic_texts = {doc["semantic_text"] for doc in docs if doc["action"] == "query"}
+
+    assert "what is kitchen lights" in semantic_texts
+    assert "status of kitchen lights" in semantic_texts
+    assert "tell me the status of kitchen lights" in semantic_texts
+    assert "what is the status of kitchen" in semantic_texts
 
 
 def test_fuzzy_path_prefers_great_room_fan_for_band() -> None:

@@ -1263,7 +1263,10 @@ class LocalIntentResolver:
             for action in sorted(target.actions):
                 if action == "set":
                     continue
-                semantic_texts = [self._canonical_text_from_action_target(action, target.name)]
+                semantic_texts = self._semantic_texts_for_action_target(
+                    action=action,
+                    target=target,
+                )
                 if target.synthetic and target.tool_group == "lighting" and target.area:
                     semantic_texts.append(f"{CANONICAL_ACTION_TEXT.get(action, action)} {target.area}")
                 for semantic_text in semantic_texts:
@@ -1281,6 +1284,46 @@ class LocalIntentResolver:
                         }
                     )
         return docs
+
+    def _semantic_texts_for_action_target(
+        self,
+        *,
+        action: str,
+        target: BuilderTarget,
+    ) -> list[str]:
+        """Return semantically useful phrasings for a target/action pair."""
+        target_name = target.name
+        semantic_texts = [self._canonical_text_from_action_target(action, target_name)]
+        if action != "query":
+            return semantic_texts
+
+        semantic_texts.extend(
+            [
+                f"status of {target_name}",
+                f"status for {target_name}",
+                f"tell me the status of {target_name}",
+                f"what is the status of {target_name}",
+            ]
+        )
+
+        if target.synthetic and target.area:
+            semantic_texts.extend(
+                [
+                    f"what is in {target.area}",
+                    f"what is the status of {target.area}",
+                    f"tell me the status of {target.area}",
+                ]
+            )
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for semantic_text in semantic_texts:
+            normalized = self._normalize_display_name(semantic_text)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
 
     def _build_targets(self, catalog: Catalog) -> list[BuilderTarget]:
         targets: dict[str, BuilderTarget] = {}

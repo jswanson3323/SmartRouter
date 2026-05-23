@@ -961,6 +961,15 @@ class AgentRouter:
                 and translation.valid
             )
             trace.llm_translation_tool_group_inferred = inferred_tool_group
+            if self._state_query_conflicts_with_translation(trace=trace, translation=translation):
+                trace.llm_translation_summary["valid"] = False
+                trace.llm_translation_summary["notes"] = "state_query_control_conflict"
+                trace.llm_translation_summary["confidence_reason"] = (
+                    "state_query_requires_query_intent"
+                )
+                translation.valid = False
+                translation.canonical_text = None
+                translation.raw_text = None
             translation_found_good_match = bool(
                 translation.valid and translation.canonical_text
             )
@@ -1360,6 +1369,17 @@ class AgentRouter:
             return True
         utterance_tokens = tokenize(normalized)
         return len(utterance_tokens) <= 2 and normalized in LOW_INFORMATION_ACKNOWLEDGEMENTS
+
+    def _state_query_conflicts_with_translation(
+        self,
+        *,
+        trace: ResolutionTrace,
+        translation: LLMTranslationResult,
+    ) -> bool:
+        """Reject control translations when the utterance was recognized as a state query."""
+        if trace.state_query_detected is not True:
+            return False
+        return translation.intent_family in {"entity_control", "compound_entity_control"}
 
     async def _try_local_state_query(
         self,

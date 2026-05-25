@@ -90,6 +90,18 @@ ENTITY_ACTION_RULES: dict[str, dict[str, Any]] = {
         "rule": "(turn off | switch off)",
         "tool_groups": {"lighting", "fan", "climate", "media"},
     },
+    "pause": {
+        "rule": "(pause)",
+        "tool_groups": {"media"},
+    },
+    "play": {
+        "rule": "(play | resume)",
+        "tool_groups": {"media"},
+    },
+    "stop": {
+        "rule": "(stop)",
+        "tool_groups": {"media"},
+    },
     "open": {
         "rule": "(open)",
         "tool_groups": {"covers"},
@@ -1294,8 +1306,15 @@ class LocalIntentResolver:
         """Return semantically useful phrasings for a target/action pair."""
         target_name = target.name
         semantic_texts = [self._canonical_text_from_action_target(action, target_name)]
+        if target.tool_group == "media" and action != "query":
+            semantic_texts.extend(
+                self._media_semantic_texts_for_action_target(
+                    action=action,
+                    target=target,
+                )
+            )
         if action != "query":
-            return semantic_texts
+            return self._dedupe_semantic_texts(semantic_texts)
 
         semantic_texts.extend(
             [
@@ -1315,6 +1334,79 @@ class LocalIntentResolver:
                 ]
             )
 
+        return self._dedupe_semantic_texts(semantic_texts)
+
+    def _media_semantic_texts_for_action_target(
+        self,
+        *,
+        action: str,
+        target: BuilderTarget,
+    ) -> list[str]:
+        area = target.area
+        if action == "pause":
+            phrases = [
+                "pause the music",
+                "pause music",
+                "pause the media",
+                "pause media",
+            ]
+            if area:
+                phrases.extend(
+                    [
+                        f"pause the music in {area}",
+                        f"pause the {area} music",
+                        f"pause media in {area}",
+                    ]
+                )
+            return phrases
+
+        if action == "play":
+            phrases = [
+                "play the music",
+                "play music",
+                "play the media",
+                "play media",
+                "resume the music",
+                "resume music",
+                "resume the media",
+                "resume media",
+            ]
+            if area:
+                phrases.extend(
+                    [
+                        f"play the music in {area}",
+                        f"play the {area} music",
+                        f"resume the music in {area}",
+                        f"resume the {area} music",
+                    ]
+                )
+            return phrases
+
+        if action == "stop":
+            phrases = [
+                "stop the music",
+                "stop music",
+                "stop the media",
+                "stop media",
+                "kill the music",
+                "kill music",
+                "kill the media",
+                "kill media",
+            ]
+            if area:
+                phrases.extend(
+                    [
+                        f"stop the music in {area}",
+                        f"stop the {area} music",
+                        f"kill the music in {area}",
+                        f"kill the {area} music",
+                    ]
+                )
+            return phrases
+
+        return []
+
+    def _dedupe_semantic_texts(self, semantic_texts: list[str]) -> list[str]:
         deduped: list[str] = []
         seen: set[str] = set()
         for semantic_text in semantic_texts:
@@ -1603,6 +1695,9 @@ class LocalIntentResolver:
                 "close": "close",
                 "lock": "lock",
                 "unlock": "unlock",
+                "pause": "pause",
+                "play": "play",
+                "stop": "stop",
                 "query": "query",
                 "set": "set",
             }.get(capability)

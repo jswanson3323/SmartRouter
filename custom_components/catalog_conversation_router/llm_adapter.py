@@ -25,6 +25,9 @@ JSON_BLOCK_RE = re.compile(r"\{[\s\S]*?\}")
 VALID_TRANSLATION_ACTIONS = {
     "turn_on",
     "turn_off",
+    "pause",
+    "play",
+    "stop",
     "open",
     "close",
     "lock",
@@ -74,6 +77,9 @@ Valid tool_group values:
 Valid action values:
 - turn_on
 - turn_off
+- pause
+- play
+- stop
 - open
 - close
 - lock
@@ -105,7 +111,7 @@ Instructions:
 8. Only use Device catalog targets or Known phrase texts that appear in the catalogs below.
 
 Return format:
-{{"mode":"translate|control|state|general","tool_group":"general|timers|lighting|climate|media|locks|covers|fan|lists|mixed","action":"turn_on|turn_off|open|close|lock|unlock|set|query|list|cancel|start|unknown","target":null,"translated_text":null,"confidence":0.0}}
+{{"mode":"translate|control|state|general","tool_group":"general|timers|lighting|climate|media|locks|covers|fan|lists|mixed","action":"turn_on|turn_off|pause|play|stop|open|close|lock|unlock|set|query|list|cancel|start|unknown","target":null,"translated_text":null,"confidence":0.0}}
 
 Device catalog:
 {device_catalog_lines}

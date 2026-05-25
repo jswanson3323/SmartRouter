@@ -86,6 +86,13 @@ def _catalog() -> Catalog:
                 area="Gym",
                 capabilities=["turn_on", "turn_off", "set", "query"],
             ),
+            _entity_target(
+                "media_player.office_tv",
+                "Office TV",
+                domain="media_player",
+                area="Office",
+                capabilities=["turn_on", "turn_off", "play", "pause", "stop", "set", "query"],
+            ),
         ],
         conversation_targets=[
             _conversation_target("manual:timer", "set [a] timer for {when}"),
@@ -167,6 +174,43 @@ def test_entity_builder_declines_ambiguous_partial_command() -> None:
 
     assert result.valid is False
     assert result.canonical_text is None
+
+
+def test_entity_builder_resolves_named_media_pause_command() -> None:
+    result = LocalIntentResolver().resolve(
+        utterance="pause the office tv",
+        catalog=_catalog(),
+    )
+
+    assert result.valid is True
+    assert result.source == "entity_builder"
+    assert result.canonical_text == "pause office tv"
+
+
+def test_media_semantic_docs_include_music_and_kill_variants() -> None:
+    resolver = LocalIntentResolver()
+    targets = resolver._build_targets(_catalog())
+    office_tv = next(target for target in targets if target.name == "office tv")
+
+    stop_texts = resolver._semantic_texts_for_action_target(
+        action="stop",
+        target=office_tv,
+    )
+    play_texts = resolver._semantic_texts_for_action_target(
+        action="play",
+        target=office_tv,
+    )
+    pause_texts = resolver._semantic_texts_for_action_target(
+        action="pause",
+        target=office_tv,
+    )
+
+    assert "stop the music" in stop_texts
+    assert "kill the music" in stop_texts
+    assert "stop the office music" in stop_texts
+    assert "play the music" in play_texts
+    assert "resume the music" in play_texts
+    assert "pause the media" in pause_texts
 
 
 def test_entity_builder_uses_intent_grammar_for_illuminate() -> None:

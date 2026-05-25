@@ -109,6 +109,12 @@ class _FakeStates:
         return self._mapping.get(entity_id)
 
 
+class _FakeState:
+    def __init__(self, state, attributes=None):
+        self.state = state
+        self.attributes = attributes or {}
+
+
 class _Candidate:
     def __init__(self, phrase, score=0.91, candidate_type=CandidateType.ENTITY_COMMAND, detail=None):
         self.candidate_id = "light.kitchen"
@@ -321,6 +327,145 @@ def test_fuzzy_path_success_skips_semantic_classification() -> None:
     assert llm_adapter.classify_calls == []
     assert result.trace.semantic_request_classification_available is False
     assert result.trace.semantic_request_routing_source == "skipped_due_to_fuzzy_match"
+
+
+def test_media_shorthand_pause_targets_single_playing_device() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="media-1",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="media_player.office_tv",
+                name="Office TV",
+                normalized_name="office tv",
+                aliases=[],
+                domain="media_player",
+                area="Office",
+                super_area=None,
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["pause", "play", "stop", "query"],
+                tokens=["office", "tv"],
+                phonetic_tokens=["office", "tv"],
+            ),
+            EntityTarget(
+                entity_id="media_player.office_speaker",
+                name="Office Speaker",
+                normalized_name="office speaker",
+                aliases=[],
+                domain="media_player",
+                area="Office",
+                super_area=None,
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["pause", "play", "stop", "query"],
+                tokens=["office", "speaker"],
+                phonetic_tokens=["office", "speaker"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    hass = types.SimpleNamespace(
+        states=_FakeStates(
+            {
+                "media_player.office_tv": _FakeState("playing"),
+                "media_player.office_speaker": _FakeState("idle"),
+            }
+        )
+    )
+    agent = _FakeAgentAdapter([_outcome(True, "paused")])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent,
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=hass,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="pause",
+            language="en",
+            conversation_id=None,
+            context=None,
+            origin_area="Office",
+        )
+    )
+
+    assert result.path.value == "llm_translated_local"
+    assert agent.calls[0]["text"] == "pause Office TV"
+
+
+def test_media_shorthand_pause_noops_when_nothing_is_playing() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="media-2",
+            last_refreshed="now",
+            language="en",
+            entity_count=1,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="media_player.office_tv",
+                name="Office TV",
+                normalized_name="office tv",
+                aliases=[],
+                domain="media_player",
+                area="Office",
+                super_area=None,
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["pause", "play", "stop", "query"],
+                tokens=["office", "tv"],
+                phonetic_tokens=["office", "tv"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    hass = types.SimpleNamespace(
+        states=_FakeStates(
+            {
+                "media_player.office_tv": _FakeState("idle"),
+            }
+        )
+    )
+    agent = _FakeAgentAdapter([])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent,
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=hass,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="pause",
+            language="en",
+            conversation_id=None,
+            context=None,
+            origin_area="Office",
+        )
+    )
+
+    assert result.path.value == "exact_local"
+    assert result.outcome.success is True
+    assert result.outcome.processed_locally is True
+    assert result.outcome.response_text == "Nothing is currently playing."
+    assert agent.calls == []
 
 
 def test_acknowledgement_bypasses_semantic_and_translation() -> None:

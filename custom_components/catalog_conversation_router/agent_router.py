@@ -86,6 +86,10 @@ LOCAL_ACTION_PREFIXES = (
     "turn off",
     "switch on",
     "switch off",
+    "pause",
+    "play",
+    "resume",
+    "stop",
     "open",
     "close",
     "lock",
@@ -111,7 +115,10 @@ CONTROL_LIKE_VERB_TOKENS = {
     "kill",
     "lock",
     "open",
+    "pause",
+    "play",
     "raise",
+    "resume",
     "set",
     "shut",
     "start",
@@ -122,6 +129,14 @@ CONTROL_LIKE_VERB_TOKENS = {
     "unlock",
 }
 ACTIVE_CONVERSATION_TTL = timedelta(hours=6)
+MEDIA_SHORTHAND_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("pause", "pause"),
+    ("play", "play"),
+    ("resume", "play"),
+    ("stop", "stop"),
+)
+MEDIA_ACTIVE_STATES = {"playing", "buffering"}
+MEDIA_PLAYABLE_STATES = {"paused", "idle", "on", "standby"}
 
 
 def _starts_with_supported_local_action(text: str) -> bool:
@@ -357,6 +372,31 @@ class AgentRouter:
                 trace.final_executor = "local"
                 trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
                 return state_result
+            media_result = await self._try_media_shorthand_control(
+                text=text,
+                language=language,
+                conversation_id=conversation_id,
+                context=context,
+                trace=trace,
+                catalog=catalog,
+                origin_area=resolved_origin_area,
+                origin_super_area=resolved_origin_super_area,
+                device_id=device_id,
+                satellite_id=satellite_id,
+                extra_system_prompt=extra_system_prompt,
+            )
+            if media_result is not None:
+                trace.local_action_intercepted_during_llm = True
+                self._update_conversation_tracking(
+                    conversation_id,
+                    media_result.outcome,
+                    executor="local",
+                    agent_id=self._config.local_agent_id,
+                )
+                trace.selected_path = media_result.path
+                trace.final_executor = "local"
+                trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+                return media_result
             action_result = await self._try_local_action_during_llm(
                 text=text,
                 language=language,
@@ -586,6 +626,31 @@ class AgentRouter:
             trace.final_executor = "local"
             trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
             return state_result
+
+        media_result = await self._try_media_shorthand_control(
+            text=text,
+            language=language,
+            conversation_id=conversation_id,
+            context=context,
+            trace=trace,
+            catalog=catalog,
+            origin_area=resolved_origin_area,
+            origin_super_area=resolved_origin_super_area,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=None,
+        )
+        if media_result is not None:
+            self._update_conversation_tracking(
+                conversation_id,
+                media_result.outcome,
+                executor="local",
+                agent_id=self._config.local_agent_id,
+            )
+            trace.selected_path = media_result.path
+            trace.final_executor = "local"
+            trace.route_duration_ms = round((perf_counter() - route_started) * 1000, 3)
+            return media_result
 
         if compound_local_control_request:
             match_result = SimpleNamespace(
@@ -1582,6 +1647,79 @@ class AgentRouter:
             trace=trace,
         )
 
+    async def _try_media_shorthand_control(
+        self,
+        *,
+        text: str,
+        language: str,
+        conversation_id: str | None,
+        context: Any,
+        trace: ResolutionTrace,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+        device_id: str | None,
+        satellite_id: str | None,
+        extra_system_prompt: str | None,
+    ) -> RouterResult | None:
+        parsed = self._parse_media_shorthand_request(text)
+        if parsed is None:
+            return None
+
+        action, target_text = parsed
+        resolved = self._resolve_media_shorthand_target(
+            action=action,
+            target_text=target_text,
+            catalog=catalog,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if resolved is None:
+            return None
+
+        if resolved == "noop":
+            trace.local_action_detected = True
+            trace.local_action_canonical_text = text
+            trace.local_action_response_text = "Nothing is currently playing."
+            return RouterResult(
+                path=ResolutionPath.EXACT_LOCAL,
+                outcome=LocalAgentOutcome(
+                    success=True,
+                    response=None,
+                    response_text="Nothing is currently playing.",
+                    failure_category=None,
+                    raw={"action": action, "target": None, "reason": "no_active_media"},
+                    response_type="action_done",
+                    error_code=None,
+                    processed_locally=True,
+                    conversation_id=conversation_id,
+                    continue_conversation=False,
+                ),
+                trace=trace,
+            )
+
+        canonical_text = f"{CANONICAL_ACTION_TEXT.get(action, action)} {resolved.name}".strip()
+        trace.local_action_detected = True
+        trace.local_action_canonical_text = canonical_text
+        outcome = await self._agent_adapter.async_process(
+            agent_id=self._config.local_agent_id,
+            text=canonical_text,
+            language=language,
+            conversation_id=conversation_id,
+            context=context,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=extra_system_prompt,
+        )
+        trace.local_action_response_text = outcome.response_text
+        if not outcome.success:
+            return None
+        return RouterResult(
+            path=ResolutionPath.LLM_TRANSLATED_LOCAL,
+            outcome=outcome,
+            trace=trace,
+        )
+
     async def _try_local_intent_during_llm(
         self,
         *,
@@ -2236,6 +2374,171 @@ class AgentRouter:
             if area_norm and area_norm in normalized:
                 return area
         return None
+
+    def _parse_media_shorthand_request(
+        self,
+        text: str,
+    ) -> tuple[str, str | None] | None:
+        normalized = normalize_text(text)
+        for prefix, action in MEDIA_SHORTHAND_PREFIXES:
+            if normalized == prefix:
+                return (action, None)
+            if not normalized.startswith(f"{prefix} "):
+                continue
+            remainder = normalized.removeprefix(prefix).strip()
+            while remainder.startswith(("the ", "a ", "an ")):
+                if remainder.startswith("the "):
+                    remainder = remainder[4:]
+                elif remainder.startswith("an "):
+                    remainder = remainder[3:]
+                else:
+                    remainder = remainder[2:]
+                remainder = remainder.strip()
+            return (action, remainder or None)
+        return None
+
+    def _resolve_media_shorthand_target(
+        self,
+        *,
+        action: str,
+        target_text: str | None,
+        catalog,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> EntityTarget | str | None:
+        media_entities = [
+            entity
+            for entity in catalog.entity_targets
+            if entity.domain == "media_player"
+        ]
+        if not media_entities:
+            return None
+
+        candidates = self._filter_media_entities_by_location(
+            media_entities,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if target_text:
+            matched = self._match_media_target_text(
+                candidates=candidates,
+                target_text=target_text,
+                origin_area=origin_area,
+                origin_super_area=origin_super_area,
+            )
+            if matched is not None:
+                return matched
+
+        if action == "pause":
+            active_candidates = self._filter_media_entities_by_state(
+                candidates,
+                MEDIA_ACTIVE_STATES,
+            )
+            if len(active_candidates) == 1:
+                return active_candidates[0]
+            if not active_candidates and target_text is None:
+                return "noop"
+            return None
+
+        if action == "play":
+            playable_candidates = self._filter_media_entities_by_state(
+                candidates,
+                MEDIA_PLAYABLE_STATES,
+            )
+            if len(playable_candidates) == 1:
+                return playable_candidates[0]
+            return None
+
+        if action == "stop":
+            active_candidates = self._filter_media_entities_by_state(
+                candidates,
+                MEDIA_ACTIVE_STATES | {"paused"},
+            )
+            if len(active_candidates) == 1:
+                return active_candidates[0]
+            return None
+
+        return None
+
+    def _filter_media_entities_by_location(
+        self,
+        entities: list[EntityTarget],
+        *,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> list[EntityTarget]:
+        normalized_area = normalize_text(origin_area) if origin_area else None
+        normalized_super_area = normalize_text(origin_super_area) if origin_super_area else None
+        if normalized_area:
+            area_matches = [
+                entity for entity in entities if normalize_text(entity.area or "") == normalized_area
+            ]
+            if area_matches:
+                entities = area_matches
+        if normalized_super_area:
+            super_area_matches = [
+                entity
+                for entity in entities
+                if normalize_text(entity.super_area or "") == normalized_super_area
+            ]
+            if super_area_matches:
+                entities = super_area_matches
+        return entities
+
+    def _match_media_target_text(
+        self,
+        *,
+        candidates: list[EntityTarget],
+        target_text: str,
+        origin_area: str | None,
+        origin_super_area: str | None,
+    ) -> EntityTarget | None:
+        normalized_target = normalize_text(target_text)
+        if not normalized_target:
+            return None
+
+        matches: list[EntityTarget] = []
+        for entity in candidates:
+            alias_matches = any(normalize_text(alias) == normalized_target for alias in entity.aliases)
+            if entity.normalized_name == normalized_target or alias_matches:
+                matches.append(entity)
+                continue
+            if entity.normalized_name.endswith(f" {normalized_target}"):
+                matches.append(entity)
+
+        if not matches:
+            generic_tokens = {"speaker", "speakers", "tv", "television", "receiver", "media"}
+            if normalized_target in generic_tokens:
+                matches = list(candidates)
+
+        if len(matches) == 1:
+            return matches[0]
+
+        narrowed = self._filter_media_entities_by_location(
+            matches,
+            origin_area=origin_area,
+            origin_super_area=origin_super_area,
+        )
+        if len(narrowed) == 1:
+            return narrowed[0]
+        return None
+
+    def _filter_media_entities_by_state(
+        self,
+        candidates: list[EntityTarget],
+        allowed_states: set[str],
+    ) -> list[EntityTarget]:
+        states = getattr(self._hass, "states", None)
+        if states is None or not hasattr(states, "get"):
+            return []
+
+        matched: list[EntityTarget] = []
+        for entity in candidates:
+            state = states.get(entity.entity_id)
+            value = normalize_text(getattr(state, "state", None) or "")
+            if value in allowed_states:
+                matched.append(entity)
+        return matched
 
     async def _execute_local_translation(
         self,

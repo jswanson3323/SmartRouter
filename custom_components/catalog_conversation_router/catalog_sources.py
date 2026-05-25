@@ -25,6 +25,7 @@ def _entity_capabilities_from_domain(domain: str) -> list[str]:
         "switch": ["turn_on", "turn_off"],
         "fan": ["turn_on", "turn_off", "set"],
         "climate": ["set", "query", "turn_on", "turn_off"],
+        "media_player": ["turn_on", "turn_off", "play", "pause", "stop", "set", "query"],
         "cover": ["open", "close", "set"],
         "lock": ["lock", "unlock"],
         "alarm_control_panel": ["arm", "disarm"],

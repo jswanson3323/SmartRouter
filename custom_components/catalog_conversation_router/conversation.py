@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 from time import perf_counter
 from typing import Any
 
-from .models import LocalAgentOutcome, RouterResult, StreamingFallbackRequest
+from .models import LocalAgentOutcome, ResolutionPath, RouterResult, StreamingFallbackRequest
 from .trace_store import ConversationTraceStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -188,6 +188,11 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             agent_id=result.streaming_request.llm_agent_id,
         )
         _LOGGER.debug("Post-stream resolution trace: %s", result.trace.as_dict())
+        self._sanitize_response_metadata(
+            stream_outcome.response,
+            path=result.path,
+            processed_locally=stream_outcome.processed_locally,
+        )
         self._schedule_trace_log(
             user_input=user_input,
             result=result,
@@ -216,6 +221,31 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             ),
             name=f"catalog_router_trace_log_{self._entry_id}",
         )
+
+    @staticmethod
+    def _sanitize_response_metadata(
+        response: Any,
+        *,
+        path: ResolutionPath,
+        processed_locally: bool | None,
+    ) -> None:
+        """Remove misleading local success metadata from non-local LLM fallback responses."""
+        if response is None or path != ResolutionPath.LLM_FALLBACK or processed_locally is True:
+            return
+        try:
+            data = response.response.data
+        except Exception:
+            return
+        if isinstance(data, dict):
+            data.pop("success", None)
+            data.pop("failed", None)
+            return
+        for attr in ("success", "failed"):
+            try:
+                if hasattr(data, attr):
+                    delattr(data, attr)
+            except Exception:
+                continue
 
     async def _route_request(
         self,
@@ -474,6 +504,11 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         result: RouterResult,
     ) -> ConversationResult:
         if result.outcome.response is not None:
+            self._sanitize_response_metadata(
+                result.outcome.response,
+                path=result.path,
+                processed_locally=result.outcome.processed_locally,
+            )
             return self._wrap_outcome_as_result(user_input, result.outcome)
 
         if not _CONVERSATION_API_AVAILABLE:  # pragma: no cover

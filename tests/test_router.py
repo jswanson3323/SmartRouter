@@ -5,6 +5,7 @@ import sys
 import types
 
 from custom_components.catalog_conversation_router.agent_router import AgentRouter
+from custom_components.catalog_conversation_router.conversation import CatalogRouterConversationAgent
 from custom_components.catalog_conversation_router.llm_adapter import LLMAdapter
 from custom_components.catalog_conversation_router.local_intent import LocalIntentResolver
 from custom_components.catalog_conversation_router.matcher import FuzzyMatcher
@@ -16,6 +17,7 @@ from custom_components.catalog_conversation_router.models import (
     ConversationTarget,
     LocalAgentOutcome,
     ResolvedLocalCommand,
+    ResolutionPath,
     RouterConfig,
 )
 
@@ -327,6 +329,7 @@ def test_fuzzy_path_success_skips_semantic_classification() -> None:
     assert llm_adapter.classify_calls == []
     assert result.trace.semantic_request_classification_available is False
     assert result.trace.semantic_request_routing_source == "skipped_due_to_fuzzy_match"
+    assert router._agent_adapter.calls[0]["conversation_id"] is None
 
 
 def test_media_shorthand_pause_targets_single_playing_device() -> None:
@@ -554,6 +557,26 @@ def test_query_semantic_docs_include_status_variants() -> None:
     assert "what is the status of kitchen" in semantic_texts
 
 
+def test_llm_fallback_response_metadata_is_sanitized() -> None:
+    response = types.SimpleNamespace(
+        response=types.SimpleNamespace(
+            data={
+                "success": [{"name": "Office", "type": "area"}],
+                "failed": [],
+                "code": None,
+            }
+        )
+    )
+
+    CatalogRouterConversationAgent._sanitize_response_metadata(
+        response,
+        path=ResolutionPath.LLM_FALLBACK,
+        processed_locally=False,
+    )
+
+    assert response.response.data == {"code": None}
+
+
 def test_fuzzy_path_prefers_great_room_fan_for_band() -> None:
     candidate = _Candidate("turn on great room fan")
     candidate.candidate_id = "fan.great_room_fan"
@@ -675,6 +698,29 @@ def test_llm_translated_local_success() -> None:
     )
     assert result.path.value == "llm_translated_local"
     assert router._llm_adapter.translate_calls[-1]["llm_agent_id"] == "translate-llm"
+    assert router._agent_adapter.calls[0]["conversation_id"] is None
+
+
+def test_exact_local_probe_uses_isolated_conversation_id() -> None:
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=_FakeAgentAdapter([_outcome(True)]),
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=None,
+    )
+    result = asyncio.run(
+        router.async_route(
+            text="turn on kitchen light",
+            language="en",
+            conversation_id="outer-conv-1",
+            context=None,
+        )
+    )
+
+    assert result.path.value == "exact_local"
+    assert router._agent_adapter.calls[0]["conversation_id"] is None
 
 
 def test_llm_translated_local_executes_compound_commands_in_order() -> None:

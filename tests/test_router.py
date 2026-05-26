@@ -2089,6 +2089,134 @@ def test_open_domain_request_returns_streaming_fallback_request() -> None:
     assert result.trace.route_duration_ms is not None
 
 
+def test_open_domain_request_overrides_semantic_tool_advisory() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="open-domain-1",
+            last_refreshed="now",
+            language="en",
+            entity_count=1,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.office_lamp",
+                "Office Lamp",
+                domain="light",
+                area="Office",
+                aliases=["lamp"],
+            )
+        ],
+        conversation_targets=[],
+    )
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _outcome(True, text="Lamps provide focused light for reading."),
+        classification=_Classification(
+            "tool_request",
+            0.82,
+            intent_family="entity_query",
+            reason="tell me the status of office lights",
+        ),
+    )
+    agent_adapter = _FakeAgentAdapter([])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="Give me five sentences about lamps.",
+            language="en",
+            conversation_id=None,
+            context=None,
+            origin_area="Office",
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert len(llm_adapter.classify_calls) == 1
+    assert llm_adapter.translate_calls == []
+    assert len(llm_adapter.fallback_calls) == 1
+    assert agent_adapter.calls == []
+    assert result.trace.semantic_request_classification_available is True
+    assert result.trace.semantic_request_classification_kind == "tool_request"
+    assert result.trace.semantic_request_routing_source == "heuristic_semantic_override"
+    assert result.trace.llm_translation_summary["notes"] == "direct_llm_only"
+
+
+def test_semantic_entity_query_does_not_execute_without_explicit_state_request() -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="semantic-query-1",
+            last_refreshed="now",
+            language="en",
+            entity_count=1,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            _entity_target(
+                "light.office_lamp",
+                "Office Lamp",
+                domain="light",
+                area="Office",
+                aliases=["lamp"],
+            )
+        ],
+        conversation_targets=[],
+    )
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(True, "what is office lamp", notes="semantic_entity_match"),
+        _outcome(True, text="Let me tell you about lamps."),
+        classification=_Classification(
+            "tool_request",
+            0.81,
+            intent_family="entity_query",
+            reason="what is office lamp",
+        ),
+    )
+    llm_adapter._translation.intent_family = "entity_query"
+    llm_adapter._translation.source = "semantic_entity_matcher"
+    llm_adapter._translation.debug = {
+        "action": "query",
+        "target": "office lamp",
+        "tool_group": "lighting",
+    }
+    agent_adapter = _FakeAgentAdapter([])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="lamps in office",
+            language="en",
+            conversation_id=None,
+            context=None,
+            origin_area="Office",
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    assert len(llm_adapter.translate_calls) == 1
+    assert len(llm_adapter.fallback_calls) == 1
+    assert agent_adapter.calls == []
+    assert result.trace.llm_translation_summary["notes"] == "entity_query_requires_explicit_state_request"
+    assert result.trace.exact_local_error_code == "semantic_query_requires_state_request"
+
+
 def test_semantic_general_request_bypasses_local_translation_and_hints_fallback() -> None:
     llm_adapter = _FakeLLMAdapter(
         _Translation(False, None),

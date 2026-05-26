@@ -587,6 +587,7 @@ class AgentRouter:
         semantic_request_classification: SemanticRequestClassification | None = None
         direct_llm_only = False
         compound_pipeline_failed = False
+        translated_query_requires_fallback = False
         if compound_local_control_request:
             compound_result = await self._try_compound_local_control(
                 text=text,
@@ -877,6 +878,10 @@ class AgentRouter:
             trace.semantic_request_classification_available = False
             trace.semantic_request_routing_source = "acknowledgement_bypass"
         else:
+            heuristic_direct_llm_only = self._should_bypass_local_pipeline_for_llm(
+                text=text,
+                catalog=catalog,
+            )
             semantic_request_classification = await self._llm_adapter.async_classify_request(
                 utterance=text,
                 catalog=catalog,
@@ -906,16 +911,15 @@ class AgentRouter:
                     and semantic_request_classification.confidence
                     >= REQUEST_GENERAL_BYPASS_THRESHOLD
                 )
-                trace.semantic_request_routing_source = (
-                    "semantic_classifier"
-                    if direct_llm_only
-                    else "semantic_classifier_advisory"
-                )
+                if direct_llm_only:
+                    trace.semantic_request_routing_source = "semantic_classifier"
+                elif heuristic_direct_llm_only:
+                    direct_llm_only = True
+                    trace.semantic_request_routing_source = "heuristic_semantic_override"
+                else:
+                    trace.semantic_request_routing_source = "semantic_classifier_advisory"
             else:
-                direct_llm_only = self._should_bypass_local_pipeline_for_llm(
-                    text=text,
-                    catalog=catalog,
-                )
+                direct_llm_only = heuristic_direct_llm_only
                 trace.semantic_request_routing_source = (
                     "heuristic_bypass" if direct_llm_only else "heuristic_fallback"
                 )
@@ -1035,6 +1039,22 @@ class AgentRouter:
                 translation.valid = False
                 translation.canonical_text = None
                 translation.raw_text = None
+            elif (
+                translation.valid
+                and translation.intent_family == "entity_query"
+                and trace.state_query_detected is not True
+            ):
+                trace.llm_translation_summary["valid"] = False
+                trace.llm_translation_summary["notes"] = (
+                    "entity_query_requires_explicit_state_request"
+                )
+                trace.llm_translation_summary["confidence_reason"] = (
+                    "skip_live_query_probe_without_state_query"
+                )
+                translated_query_requires_fallback = True
+                translation.valid = False
+                translation.canonical_text = None
+                translation.raw_text = None
             translation_found_good_match = bool(
                 translation.valid and translation.canonical_text
             )
@@ -1097,6 +1117,13 @@ class AgentRouter:
         if direct_llm_only:
             trace.exact_local_executed = False
             trace.exact_local_outcome = "skipped"
+        elif translated_query_requires_fallback:
+            trace.exact_local_executed = False
+            trace.exact_local_outcome = "skipped"
+            trace.exact_local_error_code = "semantic_query_requires_state_request"
+            _LOGGER.debug(
+                "EXACT_LOCAL skipped: semantic entity_query requires explicit state/status wording"
+            )
         elif unknown_local_control_request:
             trace.exact_local_executed = False
             trace.exact_local_outcome = "skipped"

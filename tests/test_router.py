@@ -4,7 +4,10 @@ import asyncio
 import sys
 import types
 
-from custom_components.catalog_conversation_router.agent_router import AgentRouter
+from custom_components.catalog_conversation_router.agent_router import (
+    AgentRouter,
+    LLM_WEB_LOOKUP_REQUIRED_MARKER,
+)
 from custom_components.catalog_conversation_router.conversation import CatalogRouterConversationAgent
 from custom_components.catalog_conversation_router.llm_adapter import LLMAdapter
 from custom_components.catalog_conversation_router.local_intent import LocalIntentResolver
@@ -2255,13 +2258,51 @@ def test_semantic_general_request_bypasses_local_translation_and_hints_fallback(
     assert len(llm_adapter.fallback_calls) == 1
     prompt = llm_adapter.fallback_calls[0]["extra_system_prompt"]
     assert prompt is not None
+    assert "ROUTER_LLM_DISABLE_TOOLS=1" not in prompt
     assert "ROUTER_LLM_FALLBACK_NEEDS_TOOLS=1" not in prompt
     assert "general/open-domain request" in prompt
     assert result.trace.llm_translation_summary["notes"] == "semantic_general_request_bypass"
     assert result.trace.semantic_request_routing_source == "semantic_classifier"
     assert result.trace.semantic_request_classification_kind == "general_request"
     assert result.trace.llm_fallback_prompt_hint_applied is True
-    assert result.trace.llm_fallback_needs_tools is False
+    assert result.trace.llm_fallback_needs_tools is True
+
+
+def test_general_live_web_request_adds_web_lookup_marker() -> None:
+    llm_adapter = _FakeLLMAdapter(
+        _Translation(False, None),
+        _outcome(True, text="Elon Musk."),
+        classification=_Classification(
+            "general_request",
+            0.9,
+            intent_family="general",
+            reason="who is the richest person in the world right now",
+        ),
+    )
+    agent_adapter = _FakeAgentAdapter([])
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=_FakeCatalogManager(),
+        matcher=_FakeMatcher(_MatchResult()),
+        agent_adapter=agent_adapter,
+        llm_adapter=llm_adapter,
+        hass=None,
+    )
+
+    result = asyncio.run(
+        router.async_route(
+            text="who is the richest person in the world right now?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "llm_fallback"
+    prompt = llm_adapter.fallback_calls[0]["extra_system_prompt"]
+    assert prompt is not None
+    assert LLM_WEB_LOOKUP_REQUIRED_MARKER in prompt
+    assert "ROUTER_LLM_DISABLE_TOOLS=1" not in prompt
 
 
 def test_semantic_tool_request_adds_fallback_hint_after_local_miss() -> None:
@@ -2299,7 +2340,8 @@ def test_semantic_tool_request_adds_fallback_hint_after_local_miss() -> None:
     assert len(llm_adapter.fallback_calls) == 1
     prompt = llm_adapter.fallback_calls[0]["extra_system_prompt"]
     assert prompt is not None
-    assert "ROUTER_LLM_FALLBACK_NEEDS_TOOLS=1" in prompt
+    assert "ROUTER_LLM_DISABLE_TOOLS=1" not in prompt
+    assert "ROUTER_LLM_FALLBACK_NEEDS_TOOLS=1" not in prompt
     assert "smart-home/tool request" in prompt
     assert result.trace.semantic_request_classification_kind == "tool_request"
     assert result.trace.llm_fallback_prompt_hint_applied is True

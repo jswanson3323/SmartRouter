@@ -44,6 +44,8 @@ _LOGGER = logging.getLogger(__name__)
 
 SLOW_ROUTE_MS = 5000.0
 LLM_FALLBACK_TOOLS_REQUIRED_MARKER = "ROUTER_LLM_FALLBACK_NEEDS_TOOLS=1"
+LLM_DISABLE_TOOLS_MARKER = "ROUTER_LLM_DISABLE_TOOLS=1"
+LLM_WEB_LOOKUP_REQUIRED_MARKER = "ROUTER_LLM_WEB_LOOKUP_REQUIRED=1"
 SUPER_AREA_LABEL_RE = re.compile(r"^superarea\s*:\s*(.+)$", re.IGNORECASE)
 STATUS_QUERY_HINTS = (
     "status",
@@ -163,6 +165,65 @@ def _looks_like_compound_local_control_request(text: str) -> bool:
     """Detect structured multi-target local control utterances joined by `and`."""
     normalized = normalize_text(text)
     return _starts_with_supported_local_action(normalized) and " and " in normalized
+
+
+WEB_LOOKUP_EXPLICIT_PHRASES = (
+    "search the web",
+    "search online",
+    "look it up",
+    "look this up",
+    "check the web",
+    "browse for",
+)
+WEB_LOOKUP_CURRENT_PHRASES = (
+    "right now",
+    "currently",
+    "current",
+    "latest",
+    "recent",
+    "today",
+    "news",
+    "weather",
+    "forecast",
+    "exchange rate",
+    "stock price",
+)
+WEB_LOOKUP_RANKING_TOKENS = {
+    "richest",
+    "biggest",
+    "largest",
+    "best",
+    "ranking",
+    "ranked",
+}
+
+
+def _should_hint_web_lookup(
+    text: str,
+    classification: SemanticRequestClassification | None,
+) -> bool:
+    """Return whether fallback should explicitly prefer live web lookup."""
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+
+    if any(phrase in normalized for phrase in WEB_LOOKUP_EXPLICIT_PHRASES):
+        return True
+
+    if any(phrase in normalized for phrase in WEB_LOOKUP_CURRENT_PHRASES):
+        return True
+
+    tokens = set(tokenize(normalized))
+    if tokens & WEB_LOOKUP_RANKING_TOKENS:
+        return True
+
+    return bool(
+        classification is not None
+        and classification.kind == "general_request"
+        and classification.intent_family in {"general", "weather"}
+        and any(token in tokens for token in {"who", "what", "when", "where"})
+        and any(token in tokens for token in {"current", "latest", "recent", "today"})
+    )
 
 
 MAX_ACTIVE_CONVERSATIONS = 256
@@ -1860,7 +1921,10 @@ class AgentRouter:
     ) -> str | None:
         """Build the compact system prompt sent to the fallback LLM."""
         upstream_prompt = extra_system_prompt.strip() if extra_system_prompt else None
-        needs_tools = self._fallback_needs_tools(semantic_request_classification)
+        needs_tools = not (
+            upstream_prompt is not None
+            and LLM_DISABLE_TOOLS_MARKER in upstream_prompt
+        )
         trace.llm_fallback_needs_tools = needs_tools
         semantic_hint = self._build_semantic_fallback_hint(
             classification=semantic_request_classification,
@@ -1874,8 +1938,10 @@ class AgentRouter:
         )
 
         prompt_parts: list[str] = []
-        if needs_tools:
-            prompt_parts.append(LLM_FALLBACK_TOOLS_REQUIRED_MARKER)
+        if not needs_tools:
+            prompt_parts.append(LLM_DISABLE_TOOLS_MARKER)
+        if _should_hint_web_lookup(text, semantic_request_classification):
+            prompt_parts.append(LLM_WEB_LOOKUP_REQUIRED_MARKER)
         if semantic_hint:
             prompt_parts.append(semantic_hint)
             trace.llm_fallback_prompt_hint_applied = True

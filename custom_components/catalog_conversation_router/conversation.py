@@ -154,6 +154,23 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             )
             return response
 
+        if result.trace.llm_fallback_needs_tools is True:
+            result.trace.llm_fallback_stream_supported = False
+            result.trace.llm_fallback_stream_used = False
+            result.trace.llm_fallback_stream_fallback_reason = "tools_require_blocking_fallback"
+            blocking_result = await self._route_request(
+                user_input,
+                allow_streaming_llm_fallback=False,
+            )
+            response = self._finalize_non_streaming_response(user_input, blocking_result)
+            self._schedule_trace_log(
+                user_input=user_input,
+                result=blocking_result,
+                outcome=blocking_result.outcome,
+                streamed=False,
+            )
+            return response
+
         if not _STREAMING_CONVERSATION_API_AVAILABLE:
             result.trace.llm_fallback_stream_supported = False
             result.trace.llm_fallback_stream_used = False
@@ -233,12 +250,27 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         if response is None or path != ResolutionPath.LLM_FALLBACK or processed_locally is True:
             return
         try:
-            data = response.response.data
+            response_payload = response.response
+        except Exception:
+            response_payload = None
+        if response_payload is not None:
+            try:
+                if getattr(response_payload, "response_type", None) == "action_done":
+                    setattr(response_payload, "response_type", "query_answer")
+            except Exception:
+                pass
+        try:
+            data = response_payload.data
         except Exception:
             return
         if isinstance(data, dict):
             data.pop("success", None)
             data.pop("failed", None)
+            if not data:
+                try:
+                    response_payload.data = {}
+                except Exception:
+                    pass
             return
         for attr in ("success", "failed"):
             try:

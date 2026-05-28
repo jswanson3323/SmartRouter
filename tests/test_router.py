@@ -1711,6 +1711,44 @@ def test_fuzzy_state_query_recovers_line_to_light() -> None:
     assert result.trace.state_query_fuzzy_match_target == "Office Light"
 
 
+def test_fuzzy_state_query_uses_entity_match_when_primary_resolution_fails(monkeypatch) -> None:
+    catalog_manager = _FakeCatalogManager()
+    catalog_manager._catalog.entity_targets = [
+        _entity_target("light.office_light", "Office Light", domain="light", area="Office"),
+        _entity_target("light.office_hall_light", "Office Hall Light", domain="light", area="Office"),
+        _entity_target("light.office_drum_light", "Office Drum Light", domain="light", area="Office"),
+    ]
+    candidate = _Candidate("Office Light", score=0.6593)
+    candidate.candidate_id = "light.office_light"
+    candidate.target_name = "Office Light"
+    candidate.action = "query"
+    router = AgentRouter(
+        config=_config(),
+        catalog_manager=catalog_manager,
+        matcher=_FakeMatcher(_MatchResult(best=candidate, top=[candidate], matched=True)),
+        agent_adapter=_FakeAgentAdapter([_outcome(True, "The office light is on.")]),
+        llm_adapter=_FakeLLMAdapter(_Translation(False, None), _outcome(True)),
+        hass=None,
+    )
+    monkeypatch.setattr(router, "_resolve_state_query_target", lambda **kwargs: None)
+
+    result = asyncio.run(
+        router.async_route(
+            text="Is the office light on?",
+            language="en",
+            conversation_id=None,
+            context=None,
+        )
+    )
+
+    assert result.path.value == "local_state_query"
+    assert router._agent_adapter.calls[-1]["text"] == "what is the state of Office Light"
+    assert result.trace.state_query_detected is True
+    assert result.trace.state_query_fuzzy_match_target == "Office Light"
+    assert result.trace.state_query_fuzzy_match_score == 0.6593
+    assert result.trace.fuzzy_local_executed is not True
+
+
 def test_active_llm_owner_preserved_after_local_state_query() -> None:
     catalog_manager = _FakeCatalogManager()
     catalog_manager._catalog.entity_targets = [

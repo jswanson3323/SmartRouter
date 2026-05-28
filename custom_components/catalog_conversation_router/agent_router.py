@@ -827,6 +827,32 @@ class AgentRouter:
                         trace.fuzzy_decision["reason"],
                     )
                 else:
+                    fuzzy_state_query = await self._try_fuzzy_matched_state_query(
+                        text=text,
+                        language=language,
+                        conversation_id=conversation_id,
+                        context=context,
+                        trace=trace,
+                        catalog=catalog,
+                        candidate=match_result.best,
+                        device_id=device_id,
+                        satellite_id=satellite_id,
+                        extra_system_prompt=extra_system_prompt,
+                        preserve_llm_owner=active_state is not None
+                        and active_state.executor_type == "llm",
+                    )
+                    if fuzzy_state_query is not None:
+                        _LOGGER.debug("ROUTER DECISION: LOCAL_STATE_QUERY (from fuzzy entity match)")
+                        if selected_path is None:
+                            selected_path = ResolutionPath.LOCAL_STATE_QUERY
+                            selected_outcome = fuzzy_state_query.outcome
+                            trace.selected_path = ResolutionPath.LOCAL_STATE_QUERY
+                            trace.final_executor = "local"
+                        if not debug_collect_all:
+                            return _result(
+                                path=ResolutionPath.LOCAL_STATE_QUERY,
+                                outcome=fuzzy_state_query.outcome,
+                            )
                     _LOGGER.debug("ROUTER PATH: FUZZY_LOCAL → calling adapter with input=%r", assist_input)
                     if _should_execute_branch():
                         fuzzy_outcome = await self._agent_adapter.async_process(
@@ -1607,6 +1633,84 @@ class AgentRouter:
         trace.state_query_canonical_text = canonical_text
         trace.state_query_fuzzy_match_target = resolved["label"]
         trace.state_query_fuzzy_match_score = round(resolved["score"], 4)
+
+        local_outcome = await self._agent_adapter.async_process(
+            agent_id=self._config.local_agent_id,
+            text=canonical_text,
+            language=language,
+            conversation_id=None if preserve_llm_owner else conversation_id,
+            context=context,
+            device_id=device_id,
+            satellite_id=satellite_id,
+            extra_system_prompt=extra_system_prompt,
+        )
+        trace.state_query_local_executed = True
+        trace.state_query_local_response_text = local_outcome.response_text
+        if not preserve_llm_owner:
+            self._update_conversation_tracking(
+                conversation_id,
+                local_outcome,
+                executor="local",
+                agent_id=self._config.local_agent_id,
+            )
+        if not local_outcome.success:
+            return None
+
+        return RouterResult(
+            path=ResolutionPath.LOCAL_STATE_QUERY,
+            outcome=local_outcome,
+            trace=trace,
+        )
+
+    async def _try_fuzzy_matched_state_query(
+        self,
+        *,
+        text: str,
+        language: str,
+        conversation_id: str | None,
+        context: Any,
+        trace: ResolutionTrace,
+        catalog,
+        candidate,
+        device_id: str | None,
+        satellite_id: str | None,
+        extra_system_prompt: str | None,
+        preserve_llm_owner: bool,
+    ) -> RouterResult | None:
+        """Execute a detected state query using the chosen fuzzy entity candidate."""
+        if trace.state_query_detected is not True or candidate is None:
+            return None
+        candidate_type = getattr(candidate, "candidate_type", None)
+        if getattr(candidate_type, "value", candidate_type) != "entity_command":
+            return None
+
+        parsed = self._parse_state_query(text)
+        if parsed is None:
+            return None
+
+        entity = next(
+            (item for item in catalog.entity_targets if item.entity_id == candidate.candidate_id),
+            None,
+        )
+        if entity is None:
+            return None
+
+        resolved = {
+            "kind": "entity",
+            "entity": entity,
+            "label": entity.name,
+            "score": candidate.score,
+        }
+        canonical_text = self._render_local_state_query(parsed=parsed, resolved=resolved)
+        if not canonical_text:
+            return None
+
+        trace.state_query_kind = parsed.query_kind
+        trace.state_query_target_phrase = parsed.target_phrase
+        trace.state_query_requested_state = parsed.requested_state
+        trace.state_query_canonical_text = canonical_text
+        trace.state_query_fuzzy_match_target = entity.name
+        trace.state_query_fuzzy_match_score = round(candidate.score, 4)
 
         local_outcome = await self._agent_adapter.async_process(
             agent_id=self._config.local_agent_id,

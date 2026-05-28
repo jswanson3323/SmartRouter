@@ -154,23 +154,6 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             )
             return response
 
-        if result.trace.llm_fallback_needs_tools is True:
-            result.trace.llm_fallback_stream_supported = False
-            result.trace.llm_fallback_stream_used = False
-            result.trace.llm_fallback_stream_fallback_reason = "tools_require_blocking_fallback"
-            blocking_result = await self._route_request(
-                user_input,
-                allow_streaming_llm_fallback=False,
-            )
-            response = self._finalize_non_streaming_response(user_input, blocking_result)
-            self._schedule_trace_log(
-                user_input=user_input,
-                result=blocking_result,
-                outcome=blocking_result.outcome,
-                streamed=False,
-            )
-            return response
-
         if not _STREAMING_CONVERSATION_API_AVAILABLE:
             result.trace.llm_fallback_stream_supported = False
             result.trace.llm_fallback_stream_used = False

@@ -22,7 +22,7 @@ CONCRETE_PATTERN_RE = re.compile(r"[\[\]\(\)\{\}\|]")
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8099
 DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
-MAX_DOC_VECTOR_CACHES = 8
+MAX_DOC_VECTOR_CACHES = 1
 QUERY_OPENERS = (
     "what is",
     "whats",

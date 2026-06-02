@@ -1,0 +1,138 @@
+--- /Users/jswanson/Downloads/conversation_merged.py
++++ /Users/jswanson/HA_Code/SmartRouter/tmp_hacs/conversation_merged.py
+@@
+-_LOGGER = logging.getLogger(__name__)
++_LOGGER = logging.getLogger(__name__)
++
++
++def _normalize_extra_system_prompt(user_input: ConversationInput) -> str | None:
++    """Return a cleaned upstream extra prompt."""
++    extra_prompt = getattr(user_input, "extra_system_prompt", None)
++    if extra_prompt is None:
++        return None
++    normalized = str(extra_prompt).strip()
++    return normalized or None
++
++
++def _build_prompt_cache_key(
++    raw_prompt: str,
++    runtime_options: dict[str, Any],
++    extra_system_prompt: str | None,
++) -> tuple[Any, ...]:
++    """Build a stable key for deciding when to rebuild the system prompt."""
++    return (
++        raw_prompt,
++        extra_system_prompt,
++        runtime_options.get(CONF_CHAT_MODEL),
++        runtime_options.get(CONF_LLM_HASS_API),
++    )
++
++
++def _compose_system_prompt(base_prompt: str, extra_system_prompt: str | None) -> str:
++    """Combine the base and upstream prompts without adding volatility."""
++    if extra_system_prompt is None:
++        return base_prompt
++    return f"{base_prompt.rstrip()}\n\n{extra_system_prompt}"
++
++
++def _build_message_history(
++    chat_log: conversation.ChatLog,
++    *,
++    remember_conversation: bool,
++) -> list[Any]:
++    """Return the message history to send to the backend."""
++    if remember_conversation:
++        return chat_log.content[:]
++
++    message_history: list[Any] = []
++    if not chat_log.content:
++        return message_history
++
++    first_message = chat_log.content[0]
++    if getattr(first_message, "role", None) == "system":
++        message_history.append(first_message)
++
++    latest_user_message = next(
++        (
++            message
++            for message in reversed(chat_log.content)
++            if getattr(message, "role", None) == "user"
++        ),
++        None,
++    )
++    if latest_user_message is not None and (
++        not message_history or latest_user_message is not message_history[-1]
++    ):
++        message_history.append(latest_user_message)
++
++    return message_history
+@@
+-        raw_prompt = self.runtime_options.get(CONF_PROMPT, DEFAULT_PROMPT)
++        raw_prompt = self.runtime_options.get(CONF_PROMPT, DEFAULT_PROMPT)
++        extra_system_prompt = _normalize_extra_system_prompt(user_input)
+@@
+-        # Ensure this chat log has the LLM API instance for tool handling.
+-        chat_log.llm_api = llm_api
+-
+-        if remember_conversation:
+-            message_history = chat_log.content[:]
+-        else:
+-            # With HA's ChatLog, content already includes the current user input.
+-            # Keep the current log so streaming/router runs have the latest turn,
+-            # while still trimming older messages below.
+-            message_history = chat_log.content[:]
++        # Ensure this chat log has the LLM API instance for tool handling.
++        chat_log.llm_api = llm_api
++        previous_extra_system_prompt = getattr(chat_log, "extra_system_prompt", None)
++        chat_log.extra_system_prompt = extra_system_prompt
++        message_history = _build_message_history(
++            chat_log,
++            remember_conversation=remember_conversation,
++        )
+ 
+         if (
++            remember_conversation
++            and
+             remember_num_interactions
+             and len(message_history) > (remember_num_interactions * 2) + 1
+         ):
+@@
+-        if len(message_history) == 0 or refresh_system_prompt:
++        prompt_cache_key = _build_prompt_cache_key(
++            raw_prompt,
++            self.runtime_options,
++            extra_system_prompt,
++        )
++        current_system_prompt = (
++            message_history[0]
++            if message_history and getattr(message_history[0], "role", None) == "system"
++            else None
++        )
++        cached_prompt_key = getattr(chat_log, "_local_llm_prompt_cache_key", None)
++        should_refresh_prompt = (
++            current_system_prompt is None
++            or cached_prompt_key != prompt_cache_key
++            or (
++                refresh_system_prompt
++                and extra_system_prompt != previous_extra_system_prompt
++            )
++        )
++
++        if should_refresh_prompt:
+             try:
++                prompt_source = _compose_system_prompt(raw_prompt, extra_system_prompt)
+                 system_prompt = conversation.SystemContent(
+                     content=self.client._generate_system_prompt(
+-                        raw_prompt,
++                        prompt_source,
+                         llm_api,
+                         self.runtime_options,
+                     )
+@@
+-            if len(message_history) == 0:
+-                message_history.append(system_prompt)
++            if current_system_prompt is None:
++                message_history.insert(0, system_prompt)
+             else:
+                 message_history[0] = system_prompt
++            setattr(chat_log, "_local_llm_prompt_cache_key", prompt_cache_key)

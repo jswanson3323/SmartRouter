@@ -2940,7 +2940,7 @@ class AgentRouter:
             return True
         if any(token in normalized.split() for token in ("light", "lights", "fan", "temperature", "temp", "thermostat", "lock", "door", "cover")):
             return True
-        return len(normalized.split()) <= 6
+        return False
 
     def _parse_state_query(self, text: str) -> ParsedStateQuery | None:
         normalized = self._normalize_temperature_text(normalize_text(text))

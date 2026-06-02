@@ -15,6 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 
 SLOW_STREAM_FIRST_DELTA_MS = 3000.0
 SLOW_STREAM_TOTAL_MS = 5000.0
+STREAM_DELTA_FLUSH_CHARS = 32
 
 _IMPORT_ERROR: Exception | None = None
 
@@ -384,10 +385,40 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             delta_queue.put_nowait(dict(delta))
 
         async def _delta_stream() -> AsyncGenerator[dict[str, Any], None]:
+            pending_content = ""
+
+            def _flush_pending() -> dict[str, Any] | None:
+                nonlocal pending_content
+                if not pending_content:
+                    return None
+                chunk = {"content": pending_content}
+                pending_content = ""
+                return chunk
+
             while True:
                 item = await delta_queue.get()
                 if item is stream_done:
+                    flushed = _flush_pending()
+                    if flushed is not None:
+                        yield flushed
                     return
+                if (
+                    isinstance(item, dict)
+                    and isinstance(item.get("content"), str)
+                    and item.get("tool_calls") is None
+                    and "role" not in item
+                    and "thinking_content" not in item
+                    and "native" not in item
+                ):
+                    pending_content += item["content"]
+                    if _should_flush_stream_delta(pending_content):
+                        flushed = _flush_pending()
+                        if flushed is not None:
+                            yield flushed
+                    continue
+                flushed = _flush_pending()
+                if flushed is not None:
+                    yield flushed
                 yield item
 
         async def _run_downstream():
@@ -588,6 +619,18 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 except Exception:
                     pass
             return wrapped
+
+
+def _should_flush_stream_delta(content: str) -> bool:
+    """Flush buffered stream content once it is large or sentence-like."""
+    stripped = content.rstrip()
+    if not stripped:
+        return False
+    if stripped.endswith((".", "!", "?", ",", ";", ":")):
+        return True
+    if len(content) >= STREAM_DELTA_FLUSH_CHARS and " " in content.strip():
+        return True
+    return False
 
 
 class CatalogRouterLegacyAgentAlias(AbstractConversationAgent):

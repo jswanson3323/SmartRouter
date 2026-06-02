@@ -556,9 +556,7 @@ class AgentRouter:
                     runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
                         active_state.agent_id
                     )
-                    if allow_streaming_llm_fallback and self._supports_router_streaming_bridge(
-                        runtime_llm_agent_id
-                    ):
+                    if allow_streaming_llm_fallback:
                         trace.llm_fallback_stream_attempted = True
                         trace.llm_fallback_stream_supported = None
                         trace.llm_fallback_stream_used = None
@@ -1314,9 +1312,7 @@ class AgentRouter:
                     semantic_request_classification=semantic_request_classification,
                 )
                 fallback_conversation_id = self._resolve_initial_llm_fallback_conversation_id()
-                if allow_streaming_llm_fallback and self._supports_router_streaming_bridge(
-                    runtime_llm_agent_id
-                ):
+                if allow_streaming_llm_fallback:
                     trace.llm_fallback_stream_attempted = True
                     trace.llm_fallback_stream_supported = None
                     trace.llm_fallback_stream_used = None
@@ -1470,7 +1466,7 @@ class AgentRouter:
                 return fallback
             return configured_agent_id
         if configured_agent_id in available_ids:
-            return configured_agent_id
+            return self._prefer_entity_llm_agent_id(configured_agent_id)
         if len(descriptors) == 1:
             fallback = descriptors[0].agent_id
             _LOGGER.info(
@@ -1478,17 +1474,37 @@ class AgentRouter:
                 configured_agent_id,
                 fallback,
             )
-            return fallback
+            return self._prefer_entity_llm_agent_id(fallback)
         return configured_agent_id
 
-    def _supports_router_streaming_bridge(self, agent_id: str) -> bool:
-        """Return whether router-managed streaming fallback is safe for an agent."""
-        for descriptor in get_registered_conversation_agents(self._hass):
-            if descriptor.agent_id != agent_id:
-                continue
-            if (descriptor.domain or "").lower() == "llama_conversation":
-                return False
-        return True
+    def _prefer_entity_llm_agent_id(self, configured_agent_id: str) -> str:
+        """Prefer a conversation entity id over a manager id when possible."""
+        descriptors = get_registered_conversation_agents(self._hass)
+        current = next(
+            (descriptor for descriptor in descriptors if descriptor.agent_id == configured_agent_id),
+            None,
+        )
+        if current is None:
+            return configured_agent_id
+        if "." in configured_agent_id:
+            return configured_agent_id
+
+        same_domain_entities = [
+            descriptor.agent_id
+            for descriptor in descriptors
+            if descriptor.agent_id != configured_agent_id
+            and descriptor.domain == current.domain
+            and "." in descriptor.agent_id
+        ]
+        if len(same_domain_entities) == 1:
+            preferred = same_domain_entities[0]
+            _LOGGER.info(
+                "Using conversation entity id %s instead of manager id %s for downstream LLM agent",
+                preferred,
+                configured_agent_id,
+            )
+            return preferred
+        return configured_agent_id
 
     def _rendered_pattern_has_empty_slots(self, slots: dict[str, str]) -> bool:
         """Return True when a rendered conversation pattern left any slot blank."""

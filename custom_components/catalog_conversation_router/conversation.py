@@ -316,6 +316,15 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             )
 
         downstream_agent = async_get_agent(self._hass, request.llm_agent_id)
+        _LOGGER.warning(
+            "Streaming fallback resolving downstream agent_id=%s found=%s type=%s supports_streaming=%s has_handle=%s conversation_id=%s",
+            request.llm_agent_id,
+            downstream_agent is not None,
+            type(downstream_agent).__name__ if downstream_agent is not None else None,
+            getattr(downstream_agent, "supports_streaming", None) if downstream_agent is not None else None,
+            hasattr(downstream_agent, "_async_handle_message") if downstream_agent is not None else False,
+            request.conversation_id,
+        )
         if downstream_agent is None:
             trace.llm_fallback_stream_supported = False
             trace.llm_fallback_stream_used = False
@@ -401,6 +410,15 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 agent_id=request.llm_agent_id,
                 extra_system_prompt=request.extra_system_prompt,
             )
+            _LOGGER.warning(
+                "Streaming fallback downstream input agent_id=%s conversation_id=%s language=%s device_id=%s satellite_id=%s extra_prompt_chars=%s",
+                request.llm_agent_id,
+                request.conversation_id,
+                request.language,
+                request.device_id,
+                request.satellite_id,
+                len(request.extra_system_prompt) if request.extra_system_prompt else 0,
+            )
             with chat_session.async_get_chat_session(
                 self._hass,
                 request.conversation_id,
@@ -411,6 +429,12 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                     downstream_input,
                     chat_log_delta_listener=_delta_listener,
                 ) as downstream_chat_log:
+                    _LOGGER.warning(
+                        "Streaming fallback opened downstream chat log agent_id=%s existing_messages=%s llm_api=%s",
+                        request.llm_agent_id,
+                        len(getattr(downstream_chat_log, "content", []) or []),
+                        getattr(downstream_chat_log, "llm_api", None) is not None,
+                    )
                     return await downstream_agent._async_handle_message(  # type: ignore[attr-defined]
                         downstream_input,
                         downstream_chat_log,
@@ -442,6 +466,12 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             downstream_result = await await_task
         except Exception as err:  # pragma: no cover - runtime safety
             stream_error = err
+            _LOGGER.warning(
+                "Streaming fallback bridge failed agent_id=%s conversation_id=%s chunk_count=%s",
+                request.llm_agent_id,
+                request.conversation_id,
+                chunk_count,
+            )
             if not await_task.done():
                 await delta_queue.put(stream_done)
                 await await_task
@@ -485,6 +515,13 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             response=downstream_result,
             device_id=request.device_id,
             satellite_id=request.satellite_id,
+        )
+        _LOGGER.warning(
+            "Streaming fallback downstream result agent_id=%s response_type=%s processed_locally=%s response_text=%r",
+            request.llm_agent_id,
+            outcome.response_type,
+            outcome.processed_locally,
+            (outcome.response_text[:160] if outcome.response_text else None),
         )
         if not outcome.response_text and content_parts:
             outcome.response_text = "".join(content_parts).strip()

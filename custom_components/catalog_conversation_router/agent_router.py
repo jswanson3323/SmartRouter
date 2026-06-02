@@ -1450,6 +1450,19 @@ class AgentRouter:
             for descriptor in get_registered_llm_agents(self._hass)
             if descriptor.agent_id not in router_ids
         ]
+        _LOGGER.warning(
+            "Runtime LLM agent resolution configured=%s router_ids=%s candidates=%s",
+            configured_agent_id,
+            sorted(router_ids),
+            [
+                {
+                    "agent_id": descriptor.agent_id,
+                    "domain": descriptor.domain,
+                    "label": descriptor.label,
+                }
+                for descriptor in descriptors
+            ],
+        )
         available_ids = {descriptor.agent_id for descriptor in descriptors}
         if configured_agent_id in router_ids:
             _LOGGER.error(
@@ -1496,6 +1509,12 @@ class AgentRouter:
             and descriptor.domain == current.domain
             and "." in descriptor.agent_id
         ]
+        _LOGGER.warning(
+            "Entity-id preference check configured=%s current_domain=%s same_domain_entities=%s",
+            configured_agent_id,
+            current.domain,
+            same_domain_entities,
+        )
         if len(same_domain_entities) == 1:
             preferred = same_domain_entities[0]
             _LOGGER.info(

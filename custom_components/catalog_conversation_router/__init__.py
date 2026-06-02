@@ -218,11 +218,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             enabled=cfg.debug_enabled,
         ),
     )
-    legacy_agent_alias = CatalogRouterLegacyAgentAlias(
-        legacy_agent_id=entry.entry_id,
-        entity_agent=conv_agent,
-        language=cfg.language,
-    )
+    legacy_agent_alias = conv_agent
 
     runtime = IntegrationRuntime(
         config=cfg,

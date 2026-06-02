@@ -119,7 +119,15 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         return await self.async_process(user_input)
 
     async def async_process(self, user_input: ConversationInput) -> ConversationResult:
-        """Process a conversation input with blocking compatibility behavior."""
+        """Process a conversation input.
+
+        When HA's ConversationEntity streaming API is available, route even
+        legacy manager-id calls through the entity-owned path so Assist sees a
+        stream-capable engine before the run starts.
+        """
+        if _STREAMING_CONVERSATION_API_AVAILABLE:
+            return await self.internal_async_process(user_input)
+
         result = await self._route_request(
             user_input,
             allow_streaming_llm_fallback=False,

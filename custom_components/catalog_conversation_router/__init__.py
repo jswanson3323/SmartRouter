@@ -143,6 +143,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up config entry runtime."""
+    router_entity_id = f"conversation.catalog_conversation_router_{entry.entry_id.lower()}"
     existing_runtime: IntegrationRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if existing_runtime is not None:
         _LOGGER.warning(
@@ -175,13 +176,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 cfg.llm_agent_id,
                 sorted(available_llm_agents),
             )
-    if cfg.llm_agent_id == entry.entry_id:
+    if cfg.llm_agent_id in {entry.entry_id, router_entity_id}:
         _LOGGER.error(
             "Configured llm_agent_id for entry %s points back to the router itself; disabling direct self-recursive selection at setup",
             entry.entry_id,
         )
         non_router_llm_agents = {
-            agent_id for agent_id in available_llm_agents if agent_id != entry.entry_id
+            agent_id
+            for agent_id in available_llm_agents
+            if agent_id not in {entry.entry_id, router_entity_id}
         }
         if len(non_router_llm_agents) == 1:
             cfg.llm_agent_id = next(iter(non_router_llm_agents))
@@ -207,6 +210,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         llm_adapter=llm_adapter,
         hass=hass,
         router_agent_id=entry.entry_id,
+        router_entity_id=router_entity_id,
     )
     conv_agent = CatalogRouterConversationAgent(
         router=router,

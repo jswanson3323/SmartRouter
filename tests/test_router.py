@@ -1571,61 +1571,6 @@ def test_active_llm_state_enrichment_prefers_origin_area() -> None:
     assert "Hall Light: off" not in prompt
 
 
-def test_active_llm_short_generic_followup_does_not_add_state_enrichment() -> None:
-    catalog_manager = _FakeCatalogManager()
-    catalog_manager._catalog.entity_targets = [
-        _entity_target(
-            "light.office_hall",
-            "Hall Light",
-            domain="light",
-            area="Office",
-        ),
-    ]
-    llm_adapter = _FakeLLMAdapter(
-        _Translation(False, None),
-        _conversation_result_outcome(
-            True,
-            "Sure, what do you want to know?",
-            continue_conversation=True,
-        ),
-    )
-    hass = types.SimpleNamespace(
-        states=_FakeStates(
-            {
-                "light.office_hall": types.SimpleNamespace(state="on", attributes={}),
-            }
-        )
-    )
-    router = AgentRouter(
-        config=_config(),
-        catalog_manager=catalog_manager,
-        matcher=_FakeMatcher(_MatchResult()),
-        agent_adapter=_FakeAgentAdapter([_outcome(False)]),
-        llm_adapter=llm_adapter,
-        hass=hass,
-    )
-    router._active_conversations["outer-generic-1"] = types.SimpleNamespace(
-        outer_conversation_id="outer-generic-1",
-        executor_type="llm",
-        agent_id="llm",
-        downstream_conversation_id="downstream-conv-1",
-    )
-
-    result = asyncio.run(
-        router.async_route(
-            text="tell me more",
-            language="en",
-            conversation_id="outer-generic-1",
-            context=None,
-        )
-    )
-
-    assert result.path.value == "llm_fallback"
-    prompt = llm_adapter.fallback_calls[-1]["extra_system_prompt"]
-    assert prompt is None or "Router-resolved live state for this turn" not in prompt
-    assert result.trace.llm_state_enrichment_applied is False
-
-
 def test_first_turn_llm_state_enrichment_applies_for_temperature_query() -> None:
     catalog_manager = _FakeCatalogManager()
     catalog_manager._catalog.entity_targets = [

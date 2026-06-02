@@ -15,7 +15,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
 from homeassistant.exceptions import TemplateError, HomeAssistantError
-from homeassistant.helpers import chat_session, intent, llm
+from homeassistant.helpers import intent, llm
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from custom_components.llama_conversation.utils import MalformedToolCallException
@@ -172,25 +172,6 @@ class LocalLLMAgent(ConversationEntity, AbstractConversationAgent, LocalLLMEntit
     def supported_languages(self) -> list[str] | Literal["*"]:
         """Return a list of supported languages."""
         return MATCH_ALL
-
-    async def async_process(
-        self,
-        user_input: ConversationInput,
-    ) -> ConversationResult:
-        """Process a sentence.
-
-        Keep the updated integration's async_process entry point, but delegate
-        the actual work to _async_handle_message so Home Assistant's streaming
-        pipeline/conversation router can use the same logic.
-        """
-        with (
-            chat_session.async_get_chat_session(
-                self.hass,
-                user_input.conversation_id,
-            ) as session,
-            conversation.async_get_chat_log(self.hass, session, user_input) as chat_log,
-        ):
-            return await self._async_handle_message(user_input, chat_log)
 
     async def _async_handle_message(
         self,

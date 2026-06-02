@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from .catalog import CatalogManager
-from .ha_conversation_agents import get_registered_llm_agents
+from .ha_conversation_agents import get_registered_conversation_agents, get_registered_llm_agents
 from .llm_adapter import LLMAdapter
 from .local_intent import COMPOUND_ACTION_PREFIXES
 from .matcher import FuzzyMatcher
@@ -556,7 +556,9 @@ class AgentRouter:
                     runtime_llm_agent_id = self._resolve_runtime_llm_agent_id(
                         active_state.agent_id
                     )
-                    if allow_streaming_llm_fallback:
+                    if allow_streaming_llm_fallback and self._supports_router_streaming_bridge(
+                        runtime_llm_agent_id
+                    ):
                         trace.llm_fallback_stream_attempted = True
                         trace.llm_fallback_stream_supported = None
                         trace.llm_fallback_stream_used = None
@@ -1312,7 +1314,9 @@ class AgentRouter:
                     semantic_request_classification=semantic_request_classification,
                 )
                 fallback_conversation_id = self._resolve_initial_llm_fallback_conversation_id()
-                if allow_streaming_llm_fallback:
+                if allow_streaming_llm_fallback and self._supports_router_streaming_bridge(
+                    runtime_llm_agent_id
+                ):
                     trace.llm_fallback_stream_attempted = True
                     trace.llm_fallback_stream_supported = None
                     trace.llm_fallback_stream_used = None
@@ -1476,6 +1480,15 @@ class AgentRouter:
             )
             return fallback
         return configured_agent_id
+
+    def _supports_router_streaming_bridge(self, agent_id: str) -> bool:
+        """Return whether router-managed streaming fallback is safe for an agent."""
+        for descriptor in get_registered_conversation_agents(self._hass):
+            if descriptor.agent_id != agent_id:
+                continue
+            if (descriptor.domain or "").lower() == "llama_conversation":
+                return False
+        return True
 
     def _rendered_pattern_has_empty_slots(self, slots: dict[str, str]) -> bool:
         """Return True when a rendered conversation pattern left any slot blank."""

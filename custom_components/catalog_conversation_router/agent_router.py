@@ -1502,21 +1502,27 @@ class AgentRouter:
         if "." in configured_agent_id:
             return configured_agent_id
 
-        same_domain_entities = [
-            descriptor.agent_id
+        current_label = normalize_text(current.label)
+        matching_entities = [
+            {
+                "agent_id": descriptor.agent_id,
+                "label": descriptor.label,
+            }
             for descriptor in descriptors
             if descriptor.agent_id != configured_agent_id
             and descriptor.domain == current.domain
             and "." in descriptor.agent_id
+            and normalize_text(descriptor.label) == current_label
         ]
         _LOGGER.warning(
-            "Entity-id preference check configured=%s current_domain=%s same_domain_entities=%s",
+            "Entity-id preference check configured=%s current_domain=%s current_label=%s matching_entities=%s",
             configured_agent_id,
             current.domain,
-            same_domain_entities,
+            current.label,
+            matching_entities,
         )
-        if len(same_domain_entities) == 1:
-            preferred = same_domain_entities[0]
+        if len(matching_entities) == 1:
+            preferred = matching_entities[0]["agent_id"]
             _LOGGER.info(
                 "Using conversation entity id %s instead of manager id %s for downstream LLM agent",
                 preferred,

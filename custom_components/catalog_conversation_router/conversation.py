@@ -7,6 +7,7 @@ import logging
 from collections.abc import AsyncGenerator
 from time import perf_counter
 from typing import Any
+from unittest.mock import patch
 
 from .models import LocalAgentOutcome, ResolutionPath, RouterResult, StreamingFallbackRequest
 from .trace_store import ConversationTraceStore
@@ -489,6 +490,25 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 request.satellite_id,
                 len(request.extra_system_prompt) if request.extra_system_prompt else 0,
             )
+            if type(downstream_agent).__name__ == "LocalLLMAgent":
+                from homeassistant.components import conversation as ha_conversation
+
+                original_async_get_chat_log = ha_conversation.async_get_chat_log
+
+                def _patched_async_get_chat_log(*args: Any, **kwargs: Any):
+                    kwargs.setdefault("chat_log_delta_listener", _delta_listener)
+                    return original_async_get_chat_log(*args, **kwargs)
+
+                _LOGGER.warning(
+                    "Streaming fallback using LocalLLMAgent async_process bridge agent_id=%s",
+                    request.llm_agent_id,
+                )
+                with patch.object(
+                    ha_conversation,
+                    "async_get_chat_log",
+                    _patched_async_get_chat_log,
+                ):
+                    return await downstream_agent.async_process(downstream_input)
             with chat_session.async_get_chat_session(
                 self._hass,
                 request.conversation_id,

@@ -340,10 +340,14 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 extra_system_prompt=request.extra_system_prompt,
             )
 
-        if (
-            not isinstance(downstream_agent, ConversationEntity)
-            or not getattr(downstream_agent, "supports_streaming", False)
-            or not hasattr(downstream_agent, "_async_handle_message")
+        has_stream_handler = hasattr(downstream_agent, "_async_handle_message")
+        reported_streaming = bool(getattr(downstream_agent, "supports_streaming", False))
+        local_llm_compat_streaming = (
+            type(downstream_agent).__name__ == "LocalLLMAgent"
+            and has_stream_handler
+        )
+        if not isinstance(downstream_agent, ConversationEntity) or not has_stream_handler or (
+            not reported_streaming and not local_llm_compat_streaming
         ):
             trace.llm_fallback_stream_supported = False
             trace.llm_fallback_stream_used = False
@@ -357,6 +361,11 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 device_id=request.device_id,
                 satellite_id=request.satellite_id,
                 extra_system_prompt=request.extra_system_prompt,
+            )
+        if local_llm_compat_streaming and not reported_streaming:
+            _LOGGER.warning(
+                "Streaming fallback overriding supports_streaming=False for LocalLLMAgent agent_id=%s",
+                request.llm_agent_id,
             )
 
         trace.llm_fallback_stream_supported = True

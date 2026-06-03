@@ -117,7 +117,7 @@ class ConversationTraceStore:
             },
             "trace": trace,
         }
-        return payload
+        return self._sanitize_for_yaml(payload)
 
     def _build_filename(self, payload: dict[str, Any]) -> str:
         logged_at = str(payload["logged_at"]).replace(":", "-")

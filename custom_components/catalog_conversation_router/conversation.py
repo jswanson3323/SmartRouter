@@ -152,6 +152,13 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             user_input,
             allow_streaming_llm_fallback=True,
         )
+        _LOGGER.warning(
+            "Streaming entry route selected_path=%s final_executor=%s has_streaming_request=%s response_text_preview=%r",
+            result.path.value,
+            result.trace.final_executor,
+            result.streaming_request is not None,
+            (result.outcome.response_text[:120] if result.outcome and result.outcome.response_text else None),
+        )
 
         if result.streaming_request is None:
             response = self._finalize_non_streaming_response(user_input, result)

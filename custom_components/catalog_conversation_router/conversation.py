@@ -16,6 +16,9 @@ _LOGGER = logging.getLogger(__name__)
 
 SLOW_STREAM_FIRST_DELTA_MS = 3000.0
 SLOW_STREAM_TOTAL_MS = 5000.0
+STREAM_CHUNK_TARGET_CHARS = 72
+STREAM_CHUNK_MAX_CHARS = 120
+STREAM_CHUNK_PUNCTUATION = (".", "!", "?", ";", ":")
 
 _IMPORT_ERROR: Exception | None = None
 
@@ -436,11 +439,37 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         stream_done = object()
         chunk_count = 0
         content_parts: list[str] = []
+        pending_content_parts: list[str] = []
         stream_started = perf_counter()
         first_delta_at: float | None = None
+        assistant_role_emitted = False
+
+        def _queue_delta(delta: dict[str, Any]) -> None:
+            delta_queue.put_nowait(dict(delta))
+
+        def _flush_pending_content(*, force: bool = False) -> None:
+            if not pending_content_parts:
+                return
+            combined = "".join(pending_content_parts)
+            stripped = combined.rstrip()
+            if not stripped:
+                pending_content_parts.clear()
+                return
+            if not force:
+                should_emit = False
+                if stripped.endswith(STREAM_CHUNK_PUNCTUATION):
+                    should_emit = True
+                elif len(stripped) >= STREAM_CHUNK_MAX_CHARS:
+                    should_emit = True
+                elif len(stripped) >= STREAM_CHUNK_TARGET_CHARS and stripped.endswith((" ", ",")):
+                    should_emit = True
+                if not should_emit:
+                    return
+            pending_content_parts.clear()
+            _queue_delta({"content": combined, "tool_calls": None})
 
         def _delta_listener(_downstream_chat_log, delta: dict[str, Any]) -> None:
-            nonlocal chunk_count, first_delta_at
+            nonlocal chunk_count, first_delta_at, assistant_role_emitted
             chunk_count += 1
             if first_delta_at is None:
                 first_delta_at = perf_counter()
@@ -459,9 +488,20 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                         first_delta_ms,
                         request.llm_agent_id,
                     )
-            if delta.get("content"):
-                content_parts.append(str(delta["content"]))
-            delta_queue.put_nowait(dict(delta))
+            content = delta.get("content")
+            if content:
+                if not assistant_role_emitted:
+                    _queue_delta({"role": "assistant"})
+                    assistant_role_emitted = True
+                text = str(content)
+                content_parts.append(text)
+                pending_content_parts.append(text)
+                _flush_pending_content(force=False)
+            else:
+                if delta.get("role") == "assistant":
+                    assistant_role_emitted = True
+                _flush_pending_content(force=True)
+                _queue_delta(delta)
 
         async def _delta_stream() -> AsyncGenerator[dict[str, Any], None]:
             while True:
@@ -541,6 +581,7 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             try:
                 return await downstream_task
             finally:
+                _flush_pending_content(force=True)
                 await delta_queue.put(stream_done)
 
         await_task = self._hass.async_create_task(

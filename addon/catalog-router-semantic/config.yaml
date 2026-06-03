@@ -1,5 +1,5 @@
 name: Catalog Router Semantic Service
-version: "0.2.0"
+version: "0.2.1"
 slug: catalog_router_semantic
 description: Semantic intent ranking sidecar for Catalog Conversation Router
 url: "https://github.com/example/catalog-conversation-router"

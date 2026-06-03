@@ -22,7 +22,7 @@ CONCRETE_PATTERN_RE = re.compile(r"[\[\]\(\)\{\}\|]")
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8099
 DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
-MAX_DOC_VECTOR_CACHES = 1
+MAX_DOC_VECTOR_CACHE_BYTES = 100 * 1024 * 1024
 QUERY_OPENERS = (
     "what is",
     "whats",
@@ -96,6 +96,7 @@ class SemanticService:
         self.embedder = TextEmbedding(model_name=self.model_name, lazy_load=False)
         self._doc_vector_caches: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._cache_lock = threading.Lock()
+        self._doc_vector_cache_bytes = 0
 
     def rank_phrase(self, request: PhraseRequest) -> dict[str, Any]:
         docs: list[tuple[str, str, str, bool, bool, str]] = []
@@ -341,16 +342,21 @@ class SemanticService:
                 return cache_entry["vectors"]
 
         vectors = list(self.embedder.embed(docs))
+        vector_bytes = self._estimate_vectors_bytes(vectors)
 
         with self._cache_lock:
             self._doc_vector_caches[cache_key] = {
                 "namespace": cache_namespace,
                 "doc_count": len(docs),
+                "bytes": vector_bytes,
                 "vectors": vectors,
             }
+            self._doc_vector_cache_bytes += vector_bytes
             self._doc_vector_caches.move_to_end(cache_key)
-            while len(self._doc_vector_caches) > MAX_DOC_VECTOR_CACHES:
-                self._doc_vector_caches.popitem(last=False)
+            while self._doc_vector_cache_bytes > MAX_DOC_VECTOR_CACHE_BYTES:
+                _evicted_key, evicted_entry = self._doc_vector_caches.popitem(last=False)
+                self._doc_vector_cache_bytes -= int(evicted_entry.get("bytes", 0))
+            self._doc_vector_cache_bytes = max(0, self._doc_vector_cache_bytes)
 
         return vectors
 
@@ -367,6 +373,19 @@ class SemanticService:
             sort_keys=True,
         )
         return hashlib.sha256(key_json.encode("utf-8")).hexdigest()
+
+    def _estimate_vectors_bytes(self, vectors: list[Any]) -> int:
+        total = 0
+        for vector in vectors:
+            nbytes = getattr(vector, "nbytes", None)
+            if isinstance(nbytes, int):
+                total += nbytes
+                continue
+            try:
+                total += len(vector) * 8
+            except TypeError:
+                total += 8
+        return total
 
     def _looks_like_query_utterance(self, utterance: str) -> bool:
         normalized = self._normalize_text(utterance)
@@ -507,6 +526,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "model_name": SERVICE.model_name,
         "doc_vector_cache_count": len(SERVICE._doc_vector_caches),
+        "doc_vector_cache_bytes": SERVICE._doc_vector_cache_bytes,
     }
 
 

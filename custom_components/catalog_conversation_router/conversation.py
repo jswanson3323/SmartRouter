@@ -16,9 +16,6 @@ _LOGGER = logging.getLogger(__name__)
 
 SLOW_STREAM_FIRST_DELTA_MS = 3000.0
 SLOW_STREAM_TOTAL_MS = 5000.0
-STREAM_CHUNK_TARGET_CHARS = 72
-STREAM_CHUNK_MAX_CHARS = 120
-STREAM_CHUNK_PUNCTUATION = (".", "!", "?", ";", ":")
 
 _IMPORT_ERROR: Exception | None = None
 
@@ -451,22 +448,30 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             if not pending_content_parts:
                 return
             combined = "".join(pending_content_parts)
-            stripped = combined.rstrip()
-            if not stripped:
+            if not combined.strip():
                 pending_content_parts.clear()
                 return
-            if not force:
-                should_emit = False
-                if stripped.endswith(STREAM_CHUNK_PUNCTUATION):
-                    should_emit = True
-                elif len(stripped) >= STREAM_CHUNK_MAX_CHARS:
-                    should_emit = True
-                elif len(stripped) >= STREAM_CHUNK_TARGET_CHARS and stripped.endswith((" ", ",")):
-                    should_emit = True
-                if not should_emit:
+            if force:
+                pending_content_parts.clear()
+                _queue_delta({"content": combined, "tool_calls": None})
+                return
+
+            # Emit only completed words and keep the current trailing partial word
+            # buffered until the next boundary arrives.
+            last_space = max(combined.rfind(" "), combined.rfind("\n"), combined.rfind("\t"))
+            if last_space >= 0:
+                emit_text = combined[: last_space + 1]
+                remainder = combined[last_space + 1 :]
+                if emit_text.strip():
+                    pending_content_parts.clear()
+                    if remainder:
+                        pending_content_parts.append(remainder)
+                    _queue_delta({"content": emit_text, "tool_calls": None})
                     return
-            pending_content_parts.clear()
-            _queue_delta({"content": combined, "tool_calls": None})
+
+            if combined[-1:] in {".", ",", "!", "?", ";", ":"}:
+                pending_content_parts.clear()
+                _queue_delta({"content": combined, "tool_calls": None})
 
         def _delta_listener(_downstream_chat_log, delta: dict[str, Any]) -> None:
             nonlocal chunk_count, first_delta_at, assistant_role_emitted

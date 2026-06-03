@@ -703,6 +703,17 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 request.llm_agent_id,
                 chunk_count,
             )
+        _LOGGER.warning(
+            "Streaming fallback summary agent_id=%s chunk_count=%s first_delta_ms=%s response_type=%s response_text_preview=%r continue_conversation=%s",
+            request.llm_agent_id,
+            chunk_count,
+            round((first_delta_at - stream_started) * 1000, 1)
+            if first_delta_at is not None
+            else None,
+            outcome.response_type,
+            (outcome.response_text[:160] if outcome.response_text else None),
+            outcome.continue_conversation,
+        )
         return outcome
 
     def _finalize_non_streaming_response(

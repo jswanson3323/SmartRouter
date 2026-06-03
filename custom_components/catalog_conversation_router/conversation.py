@@ -513,7 +513,16 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 if delta.get("role") == "assistant":
                     assistant_role_emitted = True
                 _flush_pending_content(force=True)
-                _queue_delta(delta)
+                if delta.get("tool_calls"):
+                    _LOGGER.warning(
+                        "Dropping downstream tool-call delta during streaming fallback agent_id=%s tool_call_count=%s",
+                        request.llm_agent_id,
+                        len(delta.get("tool_calls") or []),
+                    )
+                    return
+                # Ignore non-content metadata deltas from downstream agents. The outer
+                # Assist chat log only needs assistant-role and content updates here.
+                return
 
         async def _delta_stream() -> AsyncGenerator[dict[str, Any], None]:
             while True:
@@ -629,6 +638,27 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             trace.llm_fallback_stream_used = chunk_count > 0
             trace.llm_fallback_stream_chunk_count = chunk_count
             trace.llm_fallback_stream_fallback_reason = type(stream_error).__name__
+            partial_text = "".join(content_parts).strip()
+            if (
+                isinstance(stream_error, ValueError)
+                and str(stream_error) == "No LLM API configured"
+                and partial_text
+            ):
+                _LOGGER.warning(
+                    "Suppressing terminal No LLM API configured after partial streamed content agent_id=%s chunk_count=%s partial_text_preview=%r",
+                    request.llm_agent_id,
+                    chunk_count,
+                    partial_text[:160],
+                )
+                return LocalAgentOutcome(
+                    success=True,
+                    response=None,
+                    response_text=partial_text,
+                    failure_category=None,
+                    raw=None,
+                    conversation_id=request.conversation_id,
+                    continue_conversation=False,
+                )
             if chunk_count == 0:
                 _LOGGER.warning(
                     "Streaming fallback received no deltas before failure; falling back to blocking agent call agent_id=%s conversation_id=%s error=%s",
@@ -650,9 +680,8 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 "Streaming fallback failed after partial deltas agent_id=%s chunk_count=%s partial_text_preview=%r",
                 request.llm_agent_id,
                 chunk_count,
-                ("".join(content_parts)[:160] if content_parts else None),
+                (partial_text[:160] if partial_text else None),
             )
-            partial_text = "".join(content_parts).strip()
             if partial_text:
                 chat_log.async_add_assistant_content_without_tools(
                     AssistantContent(

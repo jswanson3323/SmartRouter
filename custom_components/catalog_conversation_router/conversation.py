@@ -615,6 +615,12 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                 request.conversation_id,
                 chunk_count,
             )
+            _LOGGER.warning(
+                "Streaming fallback bridge exception detail agent_id=%s error_type=%s error=%r",
+                request.llm_agent_id,
+                type(err).__name__,
+                err,
+            )
             if not await_task.done():
                 await delta_queue.put(stream_done)
                 await await_task
@@ -640,6 +646,12 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                     satellite_id=request.satellite_id,
                     extra_system_prompt=request.extra_system_prompt,
                 )
+            _LOGGER.warning(
+                "Streaming fallback failed after partial deltas agent_id=%s chunk_count=%s partial_text_preview=%r",
+                request.llm_agent_id,
+                chunk_count,
+                ("".join(content_parts)[:160] if content_parts else None),
+            )
             partial_text = "".join(content_parts).strip()
             if partial_text:
                 chat_log.async_add_assistant_content_without_tools(

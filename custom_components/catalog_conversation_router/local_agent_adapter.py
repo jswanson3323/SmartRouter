@@ -107,6 +107,17 @@ class AgentAdapter:
             device_id=device_id,
             satellite_id=satellite_id,
         )
+        if not outcome.success:
+            _LOGGER.warning(
+                "Agent call returned failure configured_agent_id=%s resolved_agent_id=%s response_type=%s error_code=%s processed_locally=%s response_text=%r raw_type=%s",
+                agent_id,
+                resolved_agent_id,
+                outcome.response_type,
+                outcome.error_code,
+                outcome.processed_locally,
+                (outcome.response_text[:200] if outcome.response_text else None),
+                type(response).__name__ if response is not None else None,
+            )
         return outcome
 
     def outcome_from_response(
@@ -142,6 +153,17 @@ class AgentAdapter:
             success,
             response_text,
         )
+        if not success:
+            _LOGGER.warning(
+                "LocalAgentAdapter normalized failure configured_agent_id=%s response_type=%s error_code=%s processed_locally=%s response_text=%r failure_category=%s raw_type=%s",
+                agent_id,
+                response_type,
+                error_code,
+                processed_locally,
+                (response_text[:200] if response_text else None),
+                failure.value if failure is not None else None,
+                type(response).__name__ if response is not None else None,
+            )
 
         return LocalAgentOutcome(
             success=success,

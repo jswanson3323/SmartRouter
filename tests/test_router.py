@@ -580,6 +580,60 @@ def test_llm_fallback_response_metadata_is_sanitized() -> None:
     assert response.response.data == {"code": None}
 
 
+def test_streaming_fallback_injects_blocking_outcome_into_outer_chat_log() -> None:
+    chat_log = types.SimpleNamespace(content=[], appended=[])
+
+    def _append(item):
+        chat_log.content.append(item)
+        chat_log.appended.append(item)
+
+    chat_log.async_add_assistant_content_without_tools = _append
+    user_input = types.SimpleNamespace(conversation_id="conv-1", agent_id=None)
+    outcome = LocalAgentOutcome(
+        success=True,
+        response=None,
+        response_text="Five sentences about unicorns.",
+        failure_category=None,
+        raw=None,
+        response_type="query_answer",
+    )
+
+    CatalogRouterConversationAgent._ensure_chat_log_contains_outcome(
+        chat_log=chat_log,
+        user_input=user_input,
+        outcome=outcome,
+        fallback_agent_id="llm-agent",
+    )
+
+    assert len(chat_log.appended) == 1
+    assert chat_log.appended[0].content == "Five sentences about unicorns."
+    assert chat_log.appended[0].agent_id == "llm-agent"
+
+
+def test_streaming_fallback_does_not_duplicate_existing_assistant_content() -> None:
+    existing = types.SimpleNamespace(role="assistant", content="Existing answer")
+    chat_log = types.SimpleNamespace(content=[existing], appended=[])
+    chat_log.async_add_assistant_content_without_tools = chat_log.appended.append
+    user_input = types.SimpleNamespace(conversation_id="conv-2", agent_id=None)
+    outcome = LocalAgentOutcome(
+        success=True,
+        response=None,
+        response_text="Replacement answer.",
+        failure_category=None,
+        raw=None,
+        response_type="query_answer",
+    )
+
+    CatalogRouterConversationAgent._ensure_chat_log_contains_outcome(
+        chat_log=chat_log,
+        user_input=user_input,
+        outcome=outcome,
+        fallback_agent_id="llm-agent",
+    )
+
+    assert chat_log.appended == []
+
+
 def test_fuzzy_path_prefers_great_room_fan_for_band() -> None:
     candidate = _Candidate("turn on great room fan")
     candidate.candidate_id = "fan.great_room_fan"

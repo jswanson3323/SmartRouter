@@ -50,6 +50,14 @@ except Exception as err:  # pragma: no cover - tests without HA
     _STREAMING_CONVERSATION_API_AVAILABLE = False
     _IMPORT_ERROR = err
 
+    class AssistantContent:  # type: ignore[no-redef]
+        """Fallback assistant content payload for tests without HA."""
+
+        def __init__(self, *, agent_id: str | None, content: str) -> None:
+            self.agent_id = agent_id
+            self.content = content
+            self.role = "assistant"
+
     class _AbstractConversationAgent:
         """Fallback abstract conversation agent stub."""
 
@@ -193,6 +201,12 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             path=result.path,
             processed_locally=stream_outcome.processed_locally,
         )
+        self._ensure_chat_log_contains_outcome(
+            chat_log=chat_log,
+            user_input=user_input,
+            outcome=stream_outcome,
+            fallback_agent_id=result.streaming_request.llm_agent_id,
+        )
         self._schedule_trace_log(
             user_input=user_input,
             result=result,
@@ -221,6 +235,53 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             ),
             name=f"catalog_router_trace_log_{self._entry_id}",
         )
+
+    @staticmethod
+    def _chat_log_has_terminal_assistant_content(chat_log: Any) -> bool:
+        """Return True when the outer chat log already ends with assistant content."""
+        try:
+            content = getattr(chat_log, "content", None) or []
+            last_item = content[-1]
+        except Exception:
+            return False
+        role = getattr(last_item, "role", None)
+        if role is not None:
+            return str(role).lower() == "assistant"
+        return type(last_item).__name__ == "AssistantContent"
+
+    @classmethod
+    def _ensure_chat_log_contains_outcome(
+        cls,
+        *,
+        chat_log: Any,
+        user_input: ConversationInput,
+        outcome: LocalAgentOutcome,
+        fallback_agent_id: str,
+    ) -> None:
+        """Populate the outer HA chat log when fallback returned a final answer without deltas."""
+        if cls._chat_log_has_terminal_assistant_content(chat_log):
+            return
+        content = (outcome.response_text or "").strip()
+        if not content:
+            return
+        _LOGGER.warning(
+            "Injecting fallback outcome into outer chat log conversation_id=%s response_type=%s text_preview=%r",
+            getattr(user_input, "conversation_id", None),
+            outcome.response_type,
+            content[:160],
+        )
+        try:
+            chat_log.async_add_assistant_content_without_tools(
+                AssistantContent(
+                    agent_id=getattr(user_input, "agent_id", None) or fallback_agent_id,
+                    content=content,
+                )
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Failed to inject fallback outcome into outer chat log conversation_id=%s",
+                getattr(user_input, "conversation_id", None),
+            )
 
     @staticmethod
     def _sanitize_response_metadata(
@@ -475,7 +536,7 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             downstream_result = await await_task
         except Exception as err:  # pragma: no cover - runtime safety
             stream_error = err
-            _LOGGER.warning(
+            _LOGGER.exception(
                 "Streaming fallback bridge failed agent_id=%s conversation_id=%s chunk_count=%s",
                 request.llm_agent_id,
                 request.conversation_id,
@@ -490,6 +551,12 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             trace.llm_fallback_stream_chunk_count = chunk_count
             trace.llm_fallback_stream_fallback_reason = type(stream_error).__name__
             if chunk_count == 0:
+                _LOGGER.warning(
+                    "Streaming fallback received no deltas before failure; falling back to blocking agent call agent_id=%s conversation_id=%s error=%s",
+                    request.llm_agent_id,
+                    request.conversation_id,
+                    type(stream_error).__name__,
+                )
                 return await self._router._agent_adapter.async_process(  # noqa: SLF001
                     agent_id=request.llm_agent_id,
                     text=request.utterance,
@@ -538,6 +605,12 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
         trace.llm_fallback_stream_chunk_count = chunk_count
         if chunk_count == 0:
             trace.llm_fallback_stream_fallback_reason = "no_deltas_emitted"
+            _LOGGER.warning(
+                "Streaming fallback completed without deltas agent_id=%s response_type=%s response_text=%r",
+                request.llm_agent_id,
+                outcome.response_type,
+                (outcome.response_text[:160] if outcome.response_text else None),
+            )
         total_stream_ms = (perf_counter() - stream_started) * 1000
         if total_stream_ms >= SLOW_STREAM_TOTAL_MS:
             _LOGGER.warning(

@@ -9,6 +9,7 @@ from time import perf_counter
 from typing import Any
 from unittest.mock import patch
 
+from .local_agent_adapter import normalize_chat_log_tool_order, patch_conversation_chat_log
 from .models import LocalAgentOutcome, ResolutionPath, RouterResult, StreamingFallbackRequest
 from .trace_store import ConversationTraceStore
 
@@ -554,20 +555,13 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
             if type(downstream_agent).__name__ == "LocalLLMAgent":
                 from homeassistant.components import conversation as ha_conversation
 
-                original_async_get_chat_log = ha_conversation.async_get_chat_log
-
-                def _patched_async_get_chat_log(*args: Any, **kwargs: Any):
-                    kwargs.setdefault("chat_log_delta_listener", _delta_listener)
-                    return original_async_get_chat_log(*args, **kwargs)
-
                 _LOGGER.warning(
                     "Streaming fallback using LocalLLMAgent async_process bridge agent_id=%s",
                     request.llm_agent_id,
                 )
-                with patch.object(
+                with patch_conversation_chat_log(
                     ha_conversation,
-                    "async_get_chat_log",
-                    _patched_async_get_chat_log,
+                    chat_log_delta_listener=_delta_listener,
                 ):
                     return await downstream_agent.async_process(downstream_input)
             with chat_session.async_get_chat_session(
@@ -586,6 +580,7 @@ class CatalogRouterConversationAgent(ConversationEntity, AbstractConversationAge
                         len(getattr(downstream_chat_log, "content", []) or []),
                         getattr(downstream_chat_log, "llm_api", None) is not None,
                     )
+                    normalize_chat_log_tool_order(downstream_chat_log)
                     return await downstream_agent._async_handle_message(  # type: ignore[attr-defined]
                         downstream_input,
                         downstream_chat_log,

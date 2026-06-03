@@ -2,15 +2,82 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from time import perf_counter
 from typing import Any
+from unittest.mock import patch
 
 from .models import FailureCategory, LocalAgentOutcome
 
 _LOGGER = logging.getLogger(__name__)
 
 SLOW_AGENT_CALL_MS = 3000.0
+
+
+def _stable_tool_key(tool: Any) -> str:
+    """Build a stable sort key for HA LLM tools."""
+    if isinstance(tool, dict):
+        try:
+            return json.dumps(tool, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        except Exception:
+            return repr(tool)
+
+    name = getattr(tool, "name", None)
+    if isinstance(name, str) and name:
+        return name
+
+    function = getattr(tool, "function", None)
+    function_name = getattr(function, "name", None)
+    if isinstance(function_name, str) and function_name:
+        return function_name
+
+    return repr(tool)
+
+
+def normalize_chat_log_tool_order(chat_log: Any) -> None:
+    """Sort downstream HA LLM tools into a stable order for cache reuse."""
+    llm_api = getattr(chat_log, "llm_api", None)
+    tools = getattr(llm_api, "tools", None)
+    if not isinstance(tools, list) or len(tools) < 2:
+        return
+    try:
+        normalized_tools = sorted(tools, key=_stable_tool_key)
+    except Exception:
+        _LOGGER.exception("Failed to sort llm_api tools")
+        return
+    try:
+        llm_api.tools = normalized_tools
+    except Exception:
+        _LOGGER.exception("Failed to assign sorted llm_api tools")
+
+
+def patch_conversation_chat_log(conversation_module: Any, *, chat_log_delta_listener: Any = None):
+    """Patch HA conversation chat-log creation to normalize downstream tool ordering."""
+    original_async_get_chat_log = conversation_module.async_get_chat_log
+
+    class _PatchedChatLogContext:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            chat_log = self._inner.__enter__()
+            normalize_chat_log_tool_order(chat_log)
+            return chat_log
+
+        def __exit__(self, exc_type, exc, tb):
+            return self._inner.__exit__(exc_type, exc, tb)
+
+    def _patched_async_get_chat_log(*args: Any, **kwargs: Any):
+        if chat_log_delta_listener is not None:
+            kwargs.setdefault("chat_log_delta_listener", chat_log_delta_listener)
+        return _PatchedChatLogContext(original_async_get_chat_log(*args, **kwargs))
+
+    return patch.object(
+        conversation_module,
+        "async_get_chat_log",
+        _patched_async_get_chat_log,
+    )
 
 
 class AgentAdapter:
@@ -68,7 +135,8 @@ class AgentAdapter:
                 converse_kwargs["extra_system_prompt"] = extra_system_prompt
 
             started = perf_counter()
-            response = await conversation.async_converse(**converse_kwargs)
+            with patch_conversation_chat_log(conversation):
+                response = await conversation.async_converse(**converse_kwargs)
             elapsed_ms = (perf_counter() - started) * 1000
             if elapsed_ms >= SLOW_AGENT_CALL_MS:
                 _LOGGER.warning(

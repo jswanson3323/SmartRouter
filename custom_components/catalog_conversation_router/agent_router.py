@@ -570,8 +570,8 @@ class AgentRouter:
                                 language=language,
                                 conversation_id=active_state.downstream_conversation_id,
                                 context=context,
-                                device_id=device_id,
-                                satellite_id=satellite_id,
+                                device_id=None,
+                                satellite_id=None,
                                 extra_system_prompt=llm_system_prompt,
                             ),
                         )
@@ -582,8 +582,8 @@ class AgentRouter:
                         language=language,
                         conversation_id=active_state.downstream_conversation_id,
                         context=context,
-                        device_id=device_id,
-                        satellite_id=satellite_id,
+                        device_id=None,
+                        satellite_id=None,
                         extra_system_prompt=llm_system_prompt,
                     )
                     trace.llm_fallback_duration_ms = round(
@@ -1326,8 +1326,8 @@ class AgentRouter:
                             language=language,
                             conversation_id=fallback_conversation_id,
                             context=context,
-                            device_id=device_id,
-                            satellite_id=satellite_id,
+                            device_id=None,
+                            satellite_id=None,
                             extra_system_prompt=llm_system_prompt,
                         ),
                     )
@@ -1338,8 +1338,8 @@ class AgentRouter:
                     language=language,
                     conversation_id=fallback_conversation_id,
                     context=context,
-                    device_id=device_id,
-                    satellite_id=satellite_id,
+                    device_id=None,
+                    satellite_id=None,
                     extra_system_prompt=llm_system_prompt,
                 )
                 trace.llm_fallback_duration_ms = round(
@@ -2084,48 +2084,24 @@ class AgentRouter:
         extra_system_prompt: str | None,
         semantic_request_classification: SemanticRequestClassification | None = None,
     ) -> str | None:
-        """Build the compact system prompt sent to the fallback LLM."""
+        """Build a cache-stable system prompt sent to the fallback LLM."""
+        del text, catalog, origin_area, origin_super_area, semantic_request_classification
         upstream_prompt = extra_system_prompt.strip() if extra_system_prompt else None
         needs_tools = not (
             upstream_prompt is not None
             and LLM_DISABLE_TOOLS_MARKER in upstream_prompt
         )
         trace.llm_fallback_needs_tools = needs_tools
-        semantic_hint = self._build_semantic_fallback_hint(
-            classification=semantic_request_classification,
-            trace=trace,
-        )
-        state_enrichment = self._build_llm_state_enrichment(
-            text=text,
-            catalog=catalog,
-            origin_area=origin_area,
-            origin_super_area=origin_super_area,
-        )
+        trace.llm_fallback_prompt_hint_applied = False
+        trace.llm_fallback_prompt_hint = None
+        trace.llm_state_enrichment_applied = False
+        trace.llm_state_enrichment_targets = []
+        trace.llm_state_enrichment_prompt = None
 
-        prompt_parts: list[str] = []
-        if not needs_tools:
-            prompt_parts.append(LLM_DISABLE_TOOLS_MARKER)
-        if _should_hint_web_lookup(text, semantic_request_classification):
-            prompt_parts.append(LLM_WEB_LOOKUP_REQUIRED_MARKER)
-        if semantic_hint:
-            prompt_parts.append(semantic_hint)
-            trace.llm_fallback_prompt_hint_applied = True
-            trace.llm_fallback_prompt_hint = semantic_hint
-        else:
-            trace.llm_fallback_prompt_hint_applied = False
-            trace.llm_fallback_prompt_hint = None
-
-        if state_enrichment:
-            prompt_parts.append(state_enrichment["prompt"])
-            trace.llm_state_enrichment_applied = True
-            trace.llm_state_enrichment_targets = state_enrichment["targets"]
-            trace.llm_state_enrichment_prompt = state_enrichment["prompt"]
-        else:
-            trace.llm_state_enrichment_applied = False
-            trace.llm_state_enrichment_targets = []
-            trace.llm_state_enrichment_prompt = None
-
-        fallback_prompt = "\n\n".join(prompt_parts) if prompt_parts else None
+        # Keep the fallback prompt deliberately minimal so the downstream Local LLM
+        # sees the same preprompt shape across voice, Assist debug, and test utterance
+        # runs. The intended stable variants are "tools enabled" and "tools disabled".
+        fallback_prompt = LLM_DISABLE_TOOLS_MARKER if not needs_tools else None
 
         trace.llm_fallback_upstream_prompt_suppressed = bool(upstream_prompt)
         trace.llm_fallback_upstream_prompt_chars = (

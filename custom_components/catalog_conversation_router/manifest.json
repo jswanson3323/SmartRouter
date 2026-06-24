@@ -18,8 +18,5 @@
   ],
   "loggers": [
     "custom_components.catalog_conversation_router"
-  ],
-  "requirements": [
-    "hassil==3.5.0"
   ]
 }

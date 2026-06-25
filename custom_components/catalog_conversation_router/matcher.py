@@ -280,6 +280,8 @@ class FuzzyMatcher:
                 inferred_domain=inferred_domain,
                 effective_area_hint=effective_area_hint,
                 effective_super_area_hint=effective_super_area_hint,
+                entities=catalog.entity_targets,
+                action=parsed.action,
                 entity=entity,
             )
             score_detail["super_area_preference_bonus"] = super_area_preference_bonus
@@ -920,6 +922,13 @@ class FuzzyMatcher:
         inferred_domain = self._infer_domain_from_tokens(utter_tokens)
         if not inferred_domain:
             return None
+        if self._has_same_area_compatible_candidates(
+            entities=entities,
+            inferred_domain=inferred_domain,
+            action=action,
+            area_hint=area_hint,
+        ):
+            return None
 
         super_area_tokens = set(tokenize(super_area_hint))
         area_tokens = set(tokenize(area_hint)) if area_hint else set()
@@ -1002,6 +1011,8 @@ class FuzzyMatcher:
         inferred_domain: str | None,
         effective_area_hint: str | None,
         effective_super_area_hint: str | None,
+        entities: list[EntityTarget],
+        action: str | None,
         entity: EntityTarget,
     ) -> float:
         """Prefer same-super-area entities after direct area matching."""
@@ -1010,6 +1021,13 @@ class FuzzyMatcher:
         if entity.domain != inferred_domain:
             return 0.0
         if not self._is_generic_domain_request(utter_tokens, inferred_domain):
+            return 0.0
+        if self._has_same_area_compatible_candidates(
+            entities=entities,
+            inferred_domain=inferred_domain,
+            action=action,
+            area_hint=effective_area_hint,
+        ):
             return 0.0
 
         if effective_area_hint and entity.area:
@@ -1026,6 +1044,30 @@ class FuzzyMatcher:
         if super_area_tokens <= entity_super_area_tokens:
             return 0.18
         return -0.06
+
+    def _has_same_area_compatible_candidates(
+        self,
+        *,
+        entities: list[EntityTarget],
+        inferred_domain: str | None,
+        action: str | None,
+        area_hint: str | None,
+    ) -> bool:
+        """Return whether the origin area already has compatible candidates."""
+        if not inferred_domain or not area_hint:
+            return False
+
+        area_tokens = set(tokenize(area_hint))
+        if not area_tokens:
+            return False
+
+        for entity in entities:
+            if entity.domain != inferred_domain or not entity.area:
+                continue
+            entity_area_tokens = set(tokenize(normalize_text(entity.area)))
+            if area_tokens <= entity_area_tokens and self._action_compatibility(action, entity.capabilities) > 0.0:
+                return True
+        return False
 
     def _resolve_effective_super_area_hint(
         self,

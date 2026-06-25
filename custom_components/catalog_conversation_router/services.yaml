@@ -27,13 +27,14 @@ test_utterance:
       description: Optional Home Assistant device id to use for origin area and SuperArea resolution during the dry run.
       required: false
       selector:
-        text:
+        device:
     satellite_id:
       name: Satellite entity ID
       description: Optional satellite entity id to use for origin area and SuperArea resolution during the dry run.
       required: false
       selector:
-        text:
+        entity:
+          domain: assist_satellite
     execute_branches:
       name: Execute branches
       description: Optional. When true, actually call downstream local and LLM branches while still recording the full decision tree.
@@ -62,13 +63,14 @@ test_utterance_to_file:
       description: Optional Home Assistant device id to use for origin area and SuperArea resolution during the dry run.
       required: false
       selector:
-        text:
+        device:
     satellite_id:
       name: Satellite entity ID
       description: Optional satellite entity id to use for origin area and SuperArea resolution during the dry run.
       required: false
       selector:
-        text:
+        entity:
+          domain: assist_satellite
     execute_branches:
       name: Execute branches
       description: Optional. When true, actually call downstream local and LLM branches while still recording the full decision tree.

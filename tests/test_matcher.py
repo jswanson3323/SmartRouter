@@ -440,6 +440,60 @@ def test_area_match_beats_super_area_match() -> None:
     assert result.best.canonical_phrase.lower() == "turn on master bedroom light"
 
 
+def test_partial_area_overlap_does_not_infer_super_area() -> None:
+    catalog = Catalog(
+        metadata=CatalogMetadata(
+            revision="r6b",
+            last_refreshed="now",
+            language="en",
+            entity_count=2,
+            conversation_target_count=0,
+        ),
+        entity_targets=[
+            EntityTarget(
+                entity_id="fan.guest_room_fan",
+                name="Guest Room Fan",
+                normalized_name="guest room fan",
+                aliases=[],
+                domain="fan",
+                area="Guest Room",
+                super_area=None,
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["guest", "room", "fan"],
+                phonetic_tokens=["G230", "R500", "F500"],
+            ),
+            EntityTarget(
+                entity_id="fan.teen_room_fan",
+                name="Teen Room Fan",
+                normalized_name="teen room fan",
+                aliases=[],
+                domain="fan",
+                area="Teen Room",
+                super_area="Guest",
+                floor=None,
+                device_name=None,
+                exposed=True,
+                capabilities=["turn_on", "turn_off"],
+                tokens=["teen", "room", "fan"],
+                phonetic_tokens=["T500", "R500", "F500"],
+            ),
+        ],
+        conversation_targets=[],
+    )
+    matcher = FuzzyMatcher(fuzzy_threshold=0.5, ambiguity_gap=0.05)
+    result = matcher.match("turn on the fan", catalog, origin_area="Guest Room")
+    assert result.effective_area_hint == "guest room"
+    assert result.effective_super_area_hint is None
+    assert result.best is not None
+    assert result.best.candidate_id == "fan.guest_room_fan"
+    assert result.best.canonical_phrase.lower() == "turn on guest room fan"
+    assert result.best.detail.get("super_area_scoped_domain_resolution") is None
+    assert result.matched is True
+
+
 def test_explicit_other_room_target_is_not_overridden_by_origin_area() -> None:
     catalog = Catalog(
         metadata=CatalogMetadata(

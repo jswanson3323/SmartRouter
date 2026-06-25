@@ -43,6 +43,8 @@ SERVICE_DUMP_CATALOG_TO_FILE: Final = "dump_catalog_to_file"
 
 ATTR_TEXT: Final = "text"
 ATTR_AREA: Final = "area"
+ATTR_DEVICE_ID: Final = "device_id"
+ATTR_SATELLITE_ID: Final = "satellite_id"
 ATTR_PATH: Final = "path"
 ATTR_EXECUTE_BRANCHES: Final = "execute_branches"
 

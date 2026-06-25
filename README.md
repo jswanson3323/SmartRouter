@@ -208,6 +208,20 @@ data:
   path: "router_debug.json"
 ```
 
+`area` is a synthetic override. To mirror live satellite or device routing, prefer
+passing `satellite_id` or `device_id` so the router can resolve the real origin
+area and SuperArea from Home Assistant registries.
+
+Example with live locality context:
+
+```yaml
+service: catalog_conversation_router.test_utterance_to_file
+data:
+  text: "turn on the fan"
+  satellite_id: "assist_satellite.kitchen"
+  path: "router_debug_satellite.json"
+```
+
 This writes a JSON file to:
 
 ```text

@@ -11,8 +11,10 @@ import voluptuous as vol
 
 from .const import (
     ATTR_AREA,
+    ATTR_DEVICE_ID,
     ATTR_EXECUTE_BRANCHES,
     ATTR_PATH,
+    ATTR_SATELLITE_ID,
     ATTR_TEXT,
     DOMAIN,
     SERVICE_DUMP_CATALOG,
@@ -48,6 +50,8 @@ async def async_register_services(hass) -> None:
     async def _test_utterance(call) -> dict[str, Any]:
         text = call.data[ATTR_TEXT]
         origin_area = call.data.get(ATTR_AREA)
+        device_id = call.data.get(ATTR_DEVICE_ID)
+        satellite_id = call.data.get(ATTR_SATELLITE_ID)
         execute_branches = bool(call.data.get(ATTR_EXECUTE_BRANCHES, False))
         output: dict[str, Any] = {}
         for entry_id, runtime in hass.data.get(DOMAIN, {}).items():
@@ -60,12 +64,21 @@ async def async_register_services(hass) -> None:
                 debug_collect_all=True,
                 execute_debug_branches=execute_branches,
                 origin_area=origin_area,
+                device_id=device_id,
+                satellite_id=satellite_id,
             )
             output[entry_id] = {
                 "path": result.path.value,
                 "trace": result.trace.as_dict(),
             }
-        return {"text": text, "area": origin_area, "execute_branches": execute_branches, "entries": output}
+        return {
+            "text": text,
+            "area": origin_area,
+            "device_id": device_id,
+            "satellite_id": satellite_id,
+            "execute_branches": execute_branches,
+            "entries": output,
+        }
 
     async def _test_utterance_to_file(call) -> dict[str, Any]:
         text = call.data[ATTR_TEXT]
@@ -78,6 +91,8 @@ async def async_register_services(hass) -> None:
         payload = {
             "text": text,
             "area": origin_area,
+            "device_id": call.data.get(ATTR_DEVICE_ID),
+            "satellite_id": call.data.get(ATTR_SATELLITE_ID),
             "execute_branches": bool(call.data.get(ATTR_EXECUTE_BRANCHES, False)),
             "entries": result_payload["entries"],
         }
@@ -196,6 +211,8 @@ async def async_register_services(hass) -> None:
         {
             vol.Required(ATTR_TEXT): str,
             vol.Optional(ATTR_AREA): str,
+            vol.Optional(ATTR_DEVICE_ID): str,
+            vol.Optional(ATTR_SATELLITE_ID): str,
             vol.Optional(ATTR_EXECUTE_BRANCHES): bool,
         }
     )
@@ -203,6 +220,8 @@ async def async_register_services(hass) -> None:
         {
             vol.Required(ATTR_TEXT): str,
             vol.Optional(ATTR_AREA): str,
+            vol.Optional(ATTR_DEVICE_ID): str,
+            vol.Optional(ATTR_SATELLITE_ID): str,
             vol.Optional(ATTR_PATH): str,
             vol.Optional(ATTR_EXECUTE_BRANCHES): bool,
         }

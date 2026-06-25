@@ -1040,16 +1040,12 @@ class FuzzyMatcher:
         if not area_hint:
             return None
 
-        area_tokens = set(tokenize(area_hint))
-        if not area_tokens:
-            return None
-
         matches = {
             entity.super_area.strip()
             for entity in entities
             if entity.area
             and entity.super_area
-            and area_tokens <= set(tokenize(normalize_text(entity.area)))
+            and normalize_text(entity.area) == area_hint
         }
         if len(matches) == 1:
             return next(iter(matches))

@@ -4,7 +4,9 @@ import asyncio
 
 from custom_components.catalog_conversation_router.const import (
     ATTR_EXECUTE_BRANCHES,
+    ATTR_DEVICE_ID,
     ATTR_PATH,
+    ATTR_SATELLITE_ID,
     ATTR_TEXT,
     DOMAIN,
     SERVICE_GET_CATALOG_STATS,
@@ -99,18 +101,33 @@ def test_services_handlers() -> None:
     stats_result = asyncio.run(stats(_Call()))
     assert "entries" in stats_result
 
-    test_result = asyncio.run(test_utterance(_Call({ATTR_TEXT: "turn on kitchen light"})))
+    test_result = asyncio.run(
+        test_utterance(
+            _Call(
+                {
+                    ATTR_TEXT: "turn on kitchen light",
+                    ATTR_DEVICE_ID: "device-1",
+                    ATTR_SATELLITE_ID: "assist_satellite.kitchen",
+                }
+            )
+        )
+    )
     assert test_result["entries"]["entry1"]["path"] == "exact_local"
     assert test_result["execute_branches"] is False
+    assert test_result["device_id"] == "device-1"
+    assert test_result["satellite_id"] == "assist_satellite.kitchen"
     router_call = hass.data[DOMAIN]["entry1"].router.calls[-1]
     assert router_call["debug_collect_all"] is True
     assert router_call["execute_debug_branches"] is False
+    assert router_call["device_id"] == "device-1"
+    assert router_call["satellite_id"] == "assist_satellite.kitchen"
 
     file_result = asyncio.run(
         test_utterance_to_file(
             _Call(
                 {
                     ATTR_TEXT: "turn on kitchen light",
+                    ATTR_DEVICE_ID: "device-1",
                     ATTR_PATH: "router_debug.json",
                     ATTR_EXECUTE_BRANCHES: True,
                 }
@@ -120,3 +137,4 @@ def test_services_handlers() -> None:
     assert file_result["path"] == "/config/router_debug.json"
     router_call = hass.data[DOMAIN]["entry1"].router.calls[-1]
     assert router_call["execute_debug_branches"] is True
+    assert router_call["device_id"] == "device-1"

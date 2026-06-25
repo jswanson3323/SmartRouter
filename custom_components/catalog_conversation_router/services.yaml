@@ -18,7 +18,19 @@ test_utterance:
         text:
     area:
       name: Area override
-      description: Optional area name to use for area-aware and SuperArea-aware matching during the dry run.
+      description: Optional synthetic area override. Prefer `satellite_id` or `device_id` to reproduce live satellite/device locality, including SuperArea resolution.
+      required: false
+      selector:
+        text:
+    device_id:
+      name: Device ID
+      description: Optional Home Assistant device id to use for origin area and SuperArea resolution during the dry run.
+      required: false
+      selector:
+        text:
+    satellite_id:
+      name: Satellite entity ID
+      description: Optional satellite entity id to use for origin area and SuperArea resolution during the dry run.
       required: false
       selector:
         text:
@@ -41,7 +53,19 @@ test_utterance_to_file:
         text:
     area:
       name: Area override
-      description: Optional area name to use for area-aware and SuperArea-aware matching during the dry run.
+      description: Optional synthetic area override. Prefer `satellite_id` or `device_id` to reproduce live satellite/device locality, including SuperArea resolution.
+      required: false
+      selector:
+        text:
+    device_id:
+      name: Device ID
+      description: Optional Home Assistant device id to use for origin area and SuperArea resolution during the dry run.
+      required: false
+      selector:
+        text:
+    satellite_id:
+      name: Satellite entity ID
+      description: Optional satellite entity id to use for origin area and SuperArea resolution during the dry run.
       required: false
       selector:
         text:
